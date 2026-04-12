@@ -29,10 +29,13 @@ import sys
 from pathlib import Path
 
 try:
-    from grade import get_preset  # same directory
+    from grade import get_preset, auto_grade_for_clip  # same directory
 except Exception:
     def get_preset(name: str) -> str:
         return ""
+
+    def auto_grade_for_clip(video, start=0.0, duration=None, verbose=False):  # type: ignore
+        return "eq=contrast=1.03:saturation=0.98", {}
 
 
 # -------- Subtitle style (proven at 1920×1080, from HEURISTICS §5) -----------
@@ -54,11 +57,15 @@ def run(cmd: list[str], quiet: bool = False) -> None:
 
 
 def resolve_grade_filter(grade_field: str | None) -> str:
-    """The EDL's 'grade' field can be a preset name or a raw ffmpeg filter.
+    """The EDL's 'grade' field can be a preset name, a raw ffmpeg filter, or 'auto'.
+
     Returns the filter string to embed into the per-segment -vf chain.
+    For 'auto', returns the sentinel "__AUTO__" which is resolved per-segment.
     """
     if not grade_field:
         return ""
+    if grade_field == "auto":
+        return "__AUTO__"
     # Preset names are short identifiers, filter strings contain '=' or ','.
     if re.fullmatch(r"[a-zA-Z0-9_\-]+", grade_field):
         try:
@@ -87,15 +94,25 @@ def extract_segment(
     grade_filter: str,
     out_path: Path,
     preview: bool = False,
+    draft: bool = False,
 ) -> None:
     """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
 
-    HEURISTICS §8 — fast accurate seek with -ss before -i, scale to 1080p
-    from 4K, libx264 CRF 20, yuv420p, 24fps, +faststart.
+    `-ss` before `-i` for fast accurate seeking. Scale to 1080p from 4K.
+
+    Quality ladder:
+      - final (default): 1080p libx264 fast CRF 20
+      - preview:         1080p libx264 medium CRF 22 (evaluable for QC)
+      - draft:           720p libx264 ultrafast CRF 28 (cut-point check only)
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    vf_parts = ["scale=1920:-2"] if not preview else ["scale=1280:-2"]
+    if draft:
+        scale = "scale=1280:-2"
+    else:
+        scale = "scale=1920:-2"
+
+    vf_parts = [scale]
     if grade_filter:
         vf_parts.append(grade_filter)
     vf = ",".join(vf_parts)
@@ -104,8 +121,12 @@ def extract_segment(
     fade_out_start = max(0.0, duration - 0.03)
     af = f"afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out_start:.3f}:d=0.03"
 
-    preset = "ultrafast" if preview else "fast"
-    crf = "28" if preview else "20"
+    if draft:
+        preset, crf = "ultrafast", "28"
+    elif preview:
+        preset, crf = "medium", "22"
+    else:
+        preset, crf = "fast", "20"
 
     cmd = [
         "ffmpeg", "-y",
@@ -127,11 +148,20 @@ def extract_all_segments(
     edl: dict,
     edit_dir: Path,
     preview: bool,
+    draft: bool = False,
 ) -> list[Path]:
     """Extract every EDL range into edit_dir/clips_graded/seg_NN.mp4.
-    Returns the ordered list of segment paths."""
-    grade_filter = resolve_grade_filter(edl.get("grade"))
-    clips_dir = edit_dir / ("clips_preview" if preview else "clips_graded")
+    Returns the ordered list of segment paths.
+
+    If the EDL `grade` is "auto", analyze each segment range with
+    `auto_grade_for_clip` and apply a per-segment subtle correction.
+    Otherwise, apply the same preset/raw filter to every segment.
+    """
+    resolved = resolve_grade_filter(edl.get("grade"))
+    is_auto = resolved == "__AUTO__"
+    clips_dir = edit_dir / (
+        "clips_draft" if draft else ("clips_preview" if preview else "clips_graded")
+    )
     clips_dir.mkdir(parents=True, exist_ok=True)
 
     ranges = edl["ranges"]
@@ -139,6 +169,8 @@ def extract_all_segments(
 
     seg_paths: list[Path] = []
     print(f"extracting {len(ranges)} segment(s) → {clips_dir.name}/")
+    if is_auto:
+        print("  (auto-grade per segment: analyzing each range)")
     for i, r in enumerate(ranges):
         src_name = r["source"]
         src_path = resolve_path(sources[src_name], edit_dir)
@@ -147,9 +179,16 @@ def extract_all_segments(
         duration = end - start
         out_path = clips_dir / f"seg_{i:02d}_{src_name}.mp4"
 
+        if is_auto:
+            seg_filter, _stats = auto_grade_for_clip(src_path, start=start, duration=duration, verbose=False)
+        else:
+            seg_filter = resolved
+
         note = r.get("beat") or r.get("note") or ""
         print(f"  [{i:02d}] {src_name}  {start:7.2f}-{end:7.2f}  ({duration:5.2f}s)  {note}")
-        extract_segment(src_path, start, duration, grade_filter, out_path, preview=preview)
+        if is_auto:
+            print(f"        grade: {seg_filter or '(none)'}")
+        extract_segment(src_path, start, duration, seg_filter, out_path, preview=preview, draft=draft)
         seg_paths.append(out_path)
 
     return seg_paths
@@ -278,6 +317,112 @@ def build_master_srt(edl: dict, edit_dir: Path, out_path: Path) -> None:
     print(f"master SRT → {out_path.name} ({len(entries)} cues)")
 
 
+# -------- Loudness normalization (social-ready audio) -----------------------
+
+
+# Social-media standard: -14 LUFS integrated, -1 dBTP peak, LRA 11 LU.
+# Matches YouTube / Instagram / TikTok / X / LinkedIn normalization targets.
+LOUDNORM_I = -14.0
+LOUDNORM_TP = -1.0
+LOUDNORM_LRA = 11.0
+
+
+def measure_loudness(video_path: Path) -> dict[str, str] | None:
+    """Run ffmpeg loudnorm first pass and parse the JSON measurement.
+
+    Returns a dict with measured_i, measured_tp, measured_lra, measured_thresh,
+    target_offset, or None if measurement failed.
+    """
+    filter_str = (
+        f"loudnorm=I={LOUDNORM_I}:TP={LOUDNORM_TP}:LRA={LOUDNORM_LRA}:print_format=json"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-nostats",
+        "-i", str(video_path),
+        "-af", filter_str,
+        "-vn", "-f", "null", "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # loudnorm prints the JSON to stderr at the end of the run
+    stderr = proc.stderr
+
+    # Find the JSON block — loudnorm output contains a `{ ... }` block
+    start = stderr.rfind("{")
+    end = stderr.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(stderr[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    needed = {"input_i", "input_tp", "input_lra", "input_thresh", "target_offset"}
+    if not needed.issubset(data.keys()):
+        return None
+    return data
+
+
+def apply_loudnorm_two_pass(
+    input_path: Path,
+    output_path: Path,
+    preview: bool = False,
+) -> bool:
+    """Run two-pass loudnorm on input_path, write normalized copy to output_path.
+
+    Returns True on success, False if measurement failed (caller should fall
+    back to copying the input unchanged).
+
+    In preview mode, skips the measurement pass and uses a one-pass approximation
+    for speed. Final mode always does the proper two-pass.
+    """
+    if preview:
+        # One-pass approximation — faster, slightly less accurate.
+        filter_str = f"loudnorm=I={LOUDNORM_I}:TP={LOUDNORM_TP}:LRA={LOUDNORM_LRA}"
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-nostats",
+            "-i", str(input_path),
+            "-c:v", "copy",
+            "-af", filter_str,
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        print(f"  loudnorm (1-pass preview) → {output_path.name}")
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        return True
+
+    # Full two-pass
+    print(f"  loudnorm pass 1: measuring {input_path.name}")
+    measurement = measure_loudness(input_path)
+    if measurement is None:
+        print("  loudnorm measurement failed — falling back to 1-pass")
+        return apply_loudnorm_two_pass(input_path, output_path, preview=True)
+
+    print(f"    measured: I={measurement['input_i']} LUFS  "
+          f"TP={measurement['input_tp']}  LRA={measurement['input_lra']}")
+
+    filter_str = (
+        f"loudnorm=I={LOUDNORM_I}:TP={LOUDNORM_TP}:LRA={LOUDNORM_LRA}"
+        f":measured_I={measurement['input_i']}"
+        f":measured_TP={measurement['input_tp']}"
+        f":measured_LRA={measurement['input_lra']}"
+        f":measured_thresh={measurement['input_thresh']}"
+        f":offset={measurement['target_offset']}"
+        f":linear=true"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-nostats",
+        "-i", str(input_path),
+        "-c:v", "copy",
+        "-af", filter_str,
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    print(f"  loudnorm pass 2: normalizing → {output_path.name}")
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    return True
+
+
 # -------- Final compositing (Rule 1 + Rule 4) -------------------------------
 
 
@@ -364,7 +509,16 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Render a video from an EDL")
     ap.add_argument("edl", type=Path, help="Path to edl.json")
     ap.add_argument("-o", "--output", type=Path, required=True, help="Output video path")
-    ap.add_argument("--preview", action="store_true", help="Preview mode: 720p, ultrafast, CRF 28")
+    ap.add_argument(
+        "--preview",
+        action="store_true",
+        help="Preview mode: 1080p, medium, CRF 22 — evaluable for QC, faster than final.",
+    )
+    ap.add_argument(
+        "--draft",
+        action="store_true",
+        help="Draft mode: 720p, ultrafast, CRF 28 — cut-point verification only.",
+    )
     ap.add_argument(
         "--build-subtitles",
         action="store_true",
@@ -374,6 +528,11 @@ def main() -> None:
         "--no-subtitles",
         action="store_true",
         help="Skip subtitles even if the EDL references one",
+    )
+    ap.add_argument(
+        "--no-loudnorm",
+        action="store_true",
+        help="Skip audio loudness normalization. Default is on (-14 LUFS, -1 dBTP, LRA 11).",
     )
     args = ap.parse_args()
 
@@ -385,11 +544,18 @@ def main() -> None:
     edit_dir = edl_path.parent
     out_path = args.output.resolve()
 
-    # 1. Extract per-segment
-    segment_paths = extract_all_segments(edl, edit_dir, preview=args.preview)
+    # 1. Extract per-segment (auto-grade per range if EDL grade is "auto")
+    segment_paths = extract_all_segments(
+        edl, edit_dir, preview=args.preview, draft=args.draft
+    )
 
     # 2. Concat → base
-    base_name = "base_preview.mp4" if args.preview else "base.mp4"
+    if args.draft:
+        base_name = "base_draft.mp4"
+    elif args.preview:
+        base_name = "base_preview.mp4"
+    else:
+        base_name = "base.mp4"
     base_path = edit_dir / base_name
     concat_segments(segment_paths, base_path, edit_dir)
 
@@ -405,9 +571,18 @@ def main() -> None:
                 print(f"warning: subtitles path in EDL does not exist: {subs_path}")
                 subs_path = None
 
-    # 4. Composite (overlays + subtitles LAST)
+    # 4. Composite (overlays + subtitles LAST) → intermediate (pre-loudnorm) path
     overlays = edl.get("overlays") or []
-    build_final_composite(base_path, overlays, subs_path, out_path, edit_dir)
+    if args.no_loudnorm:
+        # Composite directly to final output
+        build_final_composite(base_path, overlays, subs_path, out_path, edit_dir)
+    else:
+        # Composite to a temp file, then run loudnorm → final output
+        tmp_composite = out_path.with_suffix(".prenorm.mp4")
+        build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir)
+        print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
+        apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
+        tmp_composite.unlink(missing_ok=True)
 
     size_mb = out_path.stat().st_size / (1024 * 1024)
     print(f"\ndone: {out_path} ({size_mb:.1f} MB)")

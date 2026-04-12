@@ -173,25 +173,37 @@ output_time = word.start - segment_start + segment_offset_in_output
 ```
 where `segment_offset_in_output` is the sum of durations of all earlier kept segments. Merge per-segment entries, sort by start time, write as one SRT file. `render.py` handles this.
 
-## Color grade (when requested)
+### Rule 6 — Social-ready loudness normalization is MANDATORY, final audio stage
+
+Every video destined for social media must exit at `I=-14 LUFS integrated, TP=-1 dBTP, LRA=11 LU`. This matches YouTube, Instagram, TikTok, X, LinkedIn auto-normalization targets. Delivering quieter just means the viewer's volume knob fights the video; delivering louder or clipping means the platforms crunch-compress it.
+
+Apply via ffmpeg `loudnorm` filter in **two passes** on the final composite:
+1. **Measurement pass** — `loudnorm=I=-14:TP=-1:LRA=11:print_format=json -vn -f null -` — parse the JSON block from stderr for `input_i`, `input_tp`, `input_lra`, `input_thresh`, `target_offset`.
+2. **Normalization pass** — `loudnorm=I=-14:TP=-1:LRA=11:measured_I=<>:measured_TP=<>:measured_LRA=<>:measured_thresh=<>:offset=<>:linear=true` on the composite, re-encode audio to AAC 192k 48kHz.
+
+Apply ONCE on the final concatenated + composited file — never per-segment (loudnorm needs the full track to measure correctly). `render.py` enforces this by default; use `--no-loudnorm` only if you know why.
+
+### Rule 7 — Preview mode must be evaluable
+
+`--preview` = 1080p libx264 medium CRF 22 (slightly faster than final but quality is judgeable). `--draft` = 720p ultrafast CRF 28 for cut-point verification only. The old "720p ultrafast CRF 28" preview was unwatchable and forced a second full render for QC — net slower. A preview the user can't judge has failed its purpose.
+
+## Color grade
 
 Apply **per-segment during extraction**, not post-concat — avoids double re-encode.
 
-Proven `warm_cinematic` preset (from HEURISTICS, shipped in a real launch video):
-```
-eq=contrast=1.12:brightness=-0.02:saturation=0.88,
-colorbalance=rs=0.02:gs=0.0:bs=-0.03:rm=0.04:gm=0.01:bm=-0.02:rh=0.08:gh=0.02:bh=-0.05,
-curves=master='0/0 0.25/0.22 0.75/0.78 1/1'
-```
+**Default: `auto` mode.** The `grade.py` helper samples ~10 frames from each clip range via `signalstats`, reads the mean luma / range / saturation, and emits a bounded per-segment correction (contrast ±8%, gamma ±10%, saturation ±6%). No creative color shifts. The goal is *"make it look clean without looking graded"* — the viewer should not notice the grade at all.
 
-What each piece does:
-- **`eq`** — +12% contrast, crush blacks -2%, -12% saturation (retro/terminal feel)
-- **`colorbalance`** — warm shadows/mids, cool highlights (subtle teal-and-orange split)
-- **`curves`** — master S-curve (deeper blacks, lifted highs)
+Set `"grade": "auto"` in your EDL. `render.py` resolves this per-segment by calling `grade.auto_grade_for_clip(source, start, duration)`.
 
-For Rec.709 talking-head content this is safe — skin tones stay natural. For other looks, reason about the math (ASC CDL): `slope` affects highlights, `offset` affects shadows, `power` affects midtones. Adjust one knob at a time, look at the result via `timeline_view`, iterate.
+**Opt-in presets** (use explicitly, never as default):
+- `subtle` — `eq=contrast=1.03:saturation=0.98`. Floor when auto-analysis isn't available.
+- `neutral_punch` — light contrast + subtle S-curve, no color shifts.
+- `warm_cinematic` — the original retro/cinematic look (+12% contrast, crushed blacks, warm-shadow/cool-highlight colorbalance, filmic curve). **TOO AGGRESSIVE for launch content** — it shipped in an earlier launch video but user feedback after a second run: "TOO MUCH — do not do that much color". Use only when the brief explicitly asks for nostalgic/retro/cinematic.
+- `none` — no grade.
 
-**Never** go aggressive without testing. **Never** apply a creative LUT without verifying skin tones in the actual footage.
+Why auto over fixed presets: talking-head footage varies by clip depending on exposure, ambient temperature, camera ISO. A fixed preset that flatters one take crushes another. Per-clip analysis adapts. All adjustments bounded to avoid over-correction; if a clip is already balanced, auto emits near-identity.
+
+**Never** apply a creative LUT to launch/social content without explicit user approval. **Never** go aggressive without testing via `timeline_view`.
 
 ## Subtitles (when requested)
 
@@ -285,22 +297,27 @@ draw.text((start_x, y), full_text[:chars_shown], fill=WHITE, font=f)
 
 ### Parallel sub-agents — N animations in parallel, never sequential
 
-**Never build multiple animations in one agent.** Spawn N sub-agents in parallel via the `Agent` tool — each finishes in ~80s, total wall time ≈ slowest one, not the sum. HEURISTICS observed ~4× speedup on 5 concurrent animations.
+**Never build multiple animations in one agent.** Spawn N sub-agents in parallel via the `Agent` tool — each finishes in ~80-180s, total wall time ≈ slowest one, not the sum.
 
-Each sub-agent prompt is **completely self-contained** (sub-agents have no parent context). Include all ten of:
+Each sub-agent prompt is **completely self-contained** (sub-agents have no parent context). A good brief has:
 
-1. **One-sentence goal:** *"Build ONE animation: [spec]. Nothing else."*
-2. **Output path:** absolute, where the MP4 should land (`<edit>/animations/slot_N/render.mp4`)
-3. **Exact technical spec:** 1920×1080, 24fps, H.264 yuv420p, CRF 18, duration in seconds
-4. **Style palette as RGB tuples.** Not "orange" — `(255, 90, 0)`. Not "dark" — `(10, 10, 10)`.
-5. **Exact font path** — `/System/Library/Fonts/Menlo.ttc` with the index for bold
-6. **Frame-by-frame timeline** — *"frames 0–18: X fades in. 18–30: hold. 30–84: Y draws with ease-in-out-cubic…"*
-7. **Anti-list** — *"No SYSTEM tags. No package numbers. No footers. Just the one element."*
-8. **Code pattern** — reference an existing build script path; tell the agent to copy helpers inline, not import, so parallel agents don't create cross-file dependencies
-9. **Deliverable checklist** — save script, run it, verify duration with ffprobe, report path + size
-10. **"Do not ask questions. If anything is ambiguous, pick the most obvious interpretation and proceed."** Otherwise agents stall waiting for clarification.
+1. **One-sentence goal:** *"Build ONE animation: [concept]. Nothing else."*
+2. **MANDATORY read-first section** — for Manim, point to `skills/manim-video/SKILL.md` + `references/visual-design.md` + `references/animation-design-thinking.md`. For PIL/Remotion, point to whatever the sub-skill ships.
+3. **NARRATIVE CONCEPT, not layout.** Describe the story the animation tells — the "aha moment" — in prose. Do NOT write "circle A at position (-3, 0), label B at position (4, 2)". Let the agent design the composition. Over-prescribing x/y coordinates produces literal labeled diagrams that look like AI slide decks (real failure mode, burned by this once).
+4. **Technical spec:** 1920×1080, 24fps, H.264 yuv420p, CRF 18, exact duration in seconds
+5. **Style palette as exact colors** (hex or RGB tuples — `#FF5A00`, not "orange"), STRICT — no other colors allowed. Font paths or names.
+6. **Opacity layering requirement** — primary 1.0, context 0.4, structural 0.15 — and require explicit `.set_opacity()` calls in the code. Everything-at-1.0 is a failure.
+7. **Transform requirement** — at least one `Transform`, `ReplacementTransform`, `TransformMatchingShapes`, or `ValueTracker`-driven update. FadeIn-only animation is lazy.
+8. **MANDATORY bounds check:** require an `ensure_in_frame(mobj)` helper that asserts every mobject lies inside the safe area (`x ∈ [-6.5, 6.5]`, `y ∈ [-3.5, 3.5]`). Text at large font sizes overflows anchor positions — this is the hidden failure mode that clips content off the frame edge.
+9. **MANDATORY still-render gate:** before running full video, the agent must render a PNG via `manim -ql --format=png -s script.py Scene`, load it with PIL, and verify the outer rows/columns are all background color. If any edge pixel is non-background, something is clipping — fix before full render. This gate has saved a full re-render cycle in practice.
+10. **Breathing room:** `self.wait(0.8)` minimum after any major reveal. Rushed animations don't land.
+11. **Anti-list** — enumerate what NOT to put on screen. "NO giant labels. NO axes. NO bars. NO SYSTEM tags." Be specific. The anti-list prevents the agent from padding with filler.
+12. **Deliverable checklist + duration verification via ffprobe.**
+13. **"Do not ask questions. If ambiguous, pick the most sophisticated interpretation that fits the safe area."**
 
-**One sub-agent = one file.** Use unique filenames (`build_anim_hook.py`, `build_anim_solution.py`) so parallel agents don't overwrite each other.
+**One sub-agent = one file.** Use unique filenames (`script.py` inside `slot_N/` dirs) so parallel agents don't overwrite each other.
+
+**Failure mode to avoid:** over-prescribed layouts. If your brief says "EXPLORATION label at x=-4.5, EXPLOITATION label at x=+4.5" you'll get a pitch deck. Describe what the scene is TRYING to communicate and trust the sub-agent's composition skills. Enforce discipline via the anti-list + bounds check, not by dictating coordinates.
 
 ## EDL format
 
