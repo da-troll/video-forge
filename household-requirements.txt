@@ -1,0 +1,7 @@
+# Household additions on top of upstream pyproject.toml.
+# Installed separately so we never touch the upstream file:
+#   cd /opt/apps/video-forge && uv pip install -r household-requirements.txt
+
+openai>=1.55,<2
+google-genai>=0.3
+playwright>=1.49
