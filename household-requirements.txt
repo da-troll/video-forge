@@ -5,3 +5,4 @@
 openai>=1.55,<2
 google-genai>=0.3
 playwright>=1.49
+pyyaml>=6.0

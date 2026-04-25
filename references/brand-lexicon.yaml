@@ -1,0 +1,72 @@
+version: 1
+
+# The dev/app ecosystem name. Use this when describing the household stack.
+brand_domain: Trollefsen
+
+# Daniel's actual surname. Use only when explicitly referring to Daniel personally.
+surname: Tollefsen
+
+# Products we actively reference in scripts.
+products:
+  - name: ClawDash
+    pronunciation: "CLAW-dash"
+    description: webchat UI for the household agents
+  - name: Podda
+    pronunciation: "POH-da"
+    description: podcast app
+  - name: Trollspace
+    pronunciation: "TROLL-space"
+    description: knowledge platform
+  - name: Mark Forge
+    pronunciation: "MARK FORGE"
+    description: logo + cover generator
+  - name: ClawPulse
+    pronunciation: "CLAW-pulse"
+    description: VPS monitor
+  - name: Hermes
+    pronunciation: "HER-meez"
+    description: agent session inspector
+
+# Agents in the household.
+agents:
+  - name: Eve
+    role: coordinator
+  - name: Wilson
+    role: builder
+  - name: Pepper
+    role: inbox guardian
+  - name: Radar
+    role: signal watcher
+  - name: C-3PO
+    role: infra/wiki
+
+# Pronunciation table. Keys are case-sensitive; matched against script tokens.
+pronunciations:
+  Trollefsen: "TROLL-ef-sen"
+  Tollefsen: "TOLL-ef-sen"
+  Podda: "POH-da"
+  Trollspace: "TROLL-space"
+  ClawDash: "CLAW-dash"
+  ClawPulse: "CLAW-pulse"
+  C-3PO: "see-three-pee-oh"
+
+# Voice rules — applied at script-draft time, not synth time. The LLM is told
+# to follow these when writing script.md.
+brand_voice_rules:
+  - Refer to the ecosystem and product domain as "Trollefsen" — never "Tollefsen".
+  - Refer to the agent system as "the household", not "Daniel's setup".
+  - Use product names exactly as written in the products list (case + spacing).
+  - Don't claim features the source material doesn't confirm.
+  - Avoid "leverages", "synergies", "transforms" — plain words only.
+
+# Conservative substitutions applied AFTER the LLM drafts the script.
+# Each rule matches whole tokens; never operates inside quoted proper nouns.
+canonicalization_rules:
+  - find: "Tollefsen product"
+    replace: "Trollefsen product"
+  - find: "Tollefsen household"
+    replace: "Trollefsen household"
+  - find: "Tollefsen ecosystem"
+    replace: "Trollefsen ecosystem"
+  - find: "Tollefsen stack"
+    replace: "Trollefsen stack"

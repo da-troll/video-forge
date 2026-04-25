@@ -12,11 +12,12 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from ..references import canonicalize_brand_terms, get_brand_voice_rules
 from ..tts import get_openai_key
 
 SCRIPT_MODEL = "gpt-5.4"
 
-SYSTEM = (
+BASE_SYSTEM = (
     "You are a senior product video scriptwriter. You write a single short "
     "voiceover script in three acts: HOOK (8–12 seconds), WALKTHROUGH "
     "(35–55 seconds), CLOSE (5–10 seconds). Total length must be 150–220 "
@@ -24,6 +25,14 @@ SYSTEM = (
     "confident, plain, and concrete. NO marketing fluff. NO superlatives. "
     "Mention only features the source material confirms — never invent."
 )
+
+
+def _build_system() -> str:
+    rules = get_brand_voice_rules()
+    if not rules:
+        return BASE_SYSTEM
+    rules_block = "\n\nBrand voice rules (apply strictly):\n" + "\n".join(f"- {r}" for r in rules)
+    return BASE_SYSTEM + rules_block
 
 
 def _read_safely(path: Path, max_chars: int = 8000) -> str:
@@ -97,11 +106,12 @@ def draft_script(project_dir: Path) -> tuple[str, dict]:
     res = client.chat.completions.create(
         model=SCRIPT_MODEL,
         messages=[
-            {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": _build_system()},
             {"role": "user", "content": _user_prompt(metadata, readme)},
         ],
     )
     body = (res.choices[0].message.content or "").strip()
+    body = canonicalize_brand_terms(body)
     return body, existing_fm
 
 

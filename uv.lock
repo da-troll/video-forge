@@ -2281,7 +2281,7 @@ wheels = [
 ]
 
 [[package]]
-name = "video-use"
+name = "video-forge"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

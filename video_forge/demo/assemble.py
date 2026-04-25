@@ -81,32 +81,200 @@ def _probe_duration(media: Path) -> float:
     return float(r.stdout.strip() or "0")
 
 
-def assemble(edit_dir: Path, *, walkthrough: Path, voiceover: Path, srt: Path, out: Path) -> Path:
-    """Compose final demo.mp4.
+# Below this gap (seconds), the hold strategy is skipped — a sub-half-second
+# tail isn't worth a re-encode and rounding noise in fade-out can synthesize
+# spurious gaps.
+HOLD_MIN_GAP_S = 0.5
 
-    - Loops walkthrough silently to match voiceover duration if the
-      voiceover is longer; trims if shorter (we want voiceover to be the
-      master timeline).
-    - Burns SRT LAST in the filter chain.
-    - Applies 30ms audio fade in/out.
+
+def _extract_last_frame(walkthrough: Path, out_png: Path) -> bool:
+    """Extract the walkthrough's final visible frame as PNG. Returns True on success."""
+    walk_dur = _probe_duration(walkthrough)
+    seek_at = max(0.0, walk_dur - 0.04)
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{seek_at:.3f}",
+        "-i", str(walkthrough),
+        "-frames:v", "1",
+        "-q:v", "2",
+        str(out_png),
+    ]
+    r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if r.returncode != 0 or not out_png.exists() or out_png.stat().st_size == 0:
+        # fallback to mid-clip
+        cmd[2] = f"{walk_dur / 2:.3f}"
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    return out_png.exists() and out_png.stat().st_size > 0
+
+
+def _build_held_tail(last_png: Path, gap_s: float, out_mp4: Path) -> None:
+    """Encode a silent video of `gap_s` seconds holding `last_png`."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", str(last_png),
+        "-t", f"{gap_s:.3f}",
+        "-r", "30",
+        "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-an",
+        str(out_mp4),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def _concat_demuxer(parts: list[Path], out_mp4: Path, edit_dir: Path) -> bool:
+    """Lossless concat with -c copy. Returns True on success; caller falls back to filter-graph if False."""
+    list_path = edit_dir / "_concat_list.txt"
+    list_path.write_text("\n".join(f"file '{p.resolve()}'" for p in parts) + "\n")
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", str(list_path),
+        "-c", "copy", "-movflags", "+faststart",
+        str(out_mp4),
+    ]
+    r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    list_path.unlink(missing_ok=True)
+    return r.returncode == 0
+
+
+def _concat_filter_graph(parts: list[Path], out_mp4: Path) -> None:
+    """Re-encode concat — used when -c copy fails due to codec param drift."""
+    inputs: list[str] = []
+    for p in parts:
+        inputs += ["-i", str(p)]
+    n = len(parts)
+    fc = "".join(f"[{i}:v:0]" for i in range(n)) + f"concat=n={n}:v=1:a=0[v]"
+    cmd = [
+        "ffmpeg", "-y", *inputs,
+        "-filter_complex", fc,
+        "-map", "[v]",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
+        str(out_mp4),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def assemble(
+    edit_dir: Path,
+    *,
+    walkthrough: Path,
+    voiceover: Path,
+    srt: Path,
+    out: Path,
+    tail_strategy: str = "hold",
+) -> dict:
+    """Compose final demo.mp4. Returns metadata dict for pipeline.log.json.
+
+    Tail strategies (when voiceover is longer than walkthrough):
+      - "hold"        : extract last frame, generate held silent video, concat (default)
+      - "loop"        : -stream_loop the walkthrough (legacy behavior)
+      - "trim_voice"  : trim voiceover to walkthrough length (debug-only)
+
+    When walkthrough >= voiceover, we always trim walkthrough to voiceover.
+
+    Honors upstream Hard Rule 1 (subtitles LAST in filter chain) and Hard
+    Rule 3 (30ms audio fades).
     """
+    if tail_strategy not in {"hold", "loop", "trim_voice"}:
+        raise ValueError(f"unknown tail_strategy: {tail_strategy}")
+
     voice_dur = _probe_duration(voiceover)
     video_dur = _probe_duration(walkthrough)
+    gap = max(0.0, voice_dur - video_dur)
+    meta: dict = {
+        "tail_strategy": tail_strategy,
+        "voice_dur": round(voice_dur, 3),
+        "walkthrough_dur": round(video_dur, 3),
+        "tail_gap_s": round(gap, 3),
+        "held_frame_path": None,
+    }
 
-    # Decide stream loop count: ceil(voice_dur / video_dur) - 1.
-    loop_count = 0
+    # When the walkthrough is already as long as (or longer than) the voiceover,
+    # all strategies degenerate to: trim walkthrough to voiceover length.
+    composed_video = walkthrough
     if voice_dur > video_dur and video_dur > 0:
-        loop_count = int(voice_dur / video_dur)  # -stream_loop is "additional loops"
+        if tail_strategy == "trim_voice":
+            # Use walkthrough as-is; the filter graph below will -shortest the audio.
+            target_dur = video_dur
+            composed_video = walkthrough
+            meta["effective_target_dur"] = round(target_dur, 3)
+        elif tail_strategy == "loop" or gap < HOLD_MIN_GAP_S:
+            # Legacy / sub-half-second case: stream_loop and trim.
+            target_dur = voice_dur
+            meta["effective_target_dur"] = round(target_dur, 3)
+            return _assemble_with_stream_loop(
+                walkthrough, voiceover, srt, out,
+                target_dur=target_dur, voice_dur=voice_dur, video_dur=video_dur,
+                meta=meta,
+            )
+        else:  # "hold"
+            held_png = edit_dir / "_last_frame.png"
+            held_mp4 = edit_dir / "_hold_tail.mp4"
+            stitched = edit_dir / "_stitched_walkthrough.mp4"
+            ok = _extract_last_frame(walkthrough, held_png)
+            if not ok:
+                # Degrade to loop rather than crash.
+                meta["hold_fallback"] = "frame_extract_failed"
+                return _assemble_with_stream_loop(
+                    walkthrough, voiceover, srt, out,
+                    target_dur=voice_dur, voice_dur=voice_dur, video_dur=video_dur,
+                    meta=meta,
+                )
+            _build_held_tail(held_png, gap, held_mp4)
+            if not _concat_demuxer([walkthrough, held_mp4], stitched, edit_dir):
+                meta["concat_method"] = "filter_graph_fallback"
+                _concat_filter_graph([walkthrough, held_mp4], stitched)
+            else:
+                meta["concat_method"] = "demuxer_copy"
+            composed_video = stitched
+            meta["held_frame_path"] = str(held_png)
+            meta["effective_target_dur"] = round(voice_dur, 3)
 
-    target_dur = max(voice_dur, 1.0)
+    target_dur = (
+        meta.get("effective_target_dur")
+        or (video_dur if (tail_strategy == "trim_voice" and voice_dur > video_dur) else max(voice_dur, video_dur, 1.0))
+    )
     fade_out_start = max(0.0, target_dur - 0.03)
 
+    # When trim_voice and voice > video, audio gets trimmed via -shortest below.
+    afade_target_dur = (
+        video_dur if tail_strategy == "trim_voice" and voice_dur > video_dur else target_dur
+    )
+    afade_out_start = max(0.0, afade_target_dur - 0.03)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(composed_video),
+        "-i", str(voiceover),
+        "-filter_complex",
+        # Subtitles applied LAST (Hard Rule 1)
+        f"[0:v]trim=duration={target_dur:.3f},setpts=PTS-STARTPTS,subtitles={srt}:force_style='{SUB_STYLE}'[v];"
+        f"[1:a]afade=t=in:st=0:d=0.03,afade=t=out:st={afade_out_start:.3f}:d=0.03[a]",
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "160k",
+        "-shortest",
+        str(out),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    return meta
+
+
+def _assemble_with_stream_loop(
+    walkthrough: Path, voiceover: Path, srt: Path, out: Path,
+    *, target_dur: float, voice_dur: float, video_dur: float, meta: dict,
+) -> dict:
+    """Legacy stream_loop path — preserved for `tail_strategy='loop'` and short-gap fallback."""
+    loop_count = 0
+    if voice_dur > video_dur and video_dur > 0:
+        loop_count = int(voice_dur / video_dur)
+    fade_out_start = max(0.0, target_dur - 0.03)
     cmd = [
         "ffmpeg", "-y",
         "-stream_loop", str(loop_count), "-i", str(walkthrough),
         "-i", str(voiceover),
         "-filter_complex",
-        # Subtitles are applied LAST (Hard Rule 1)
         f"[0:v]trim=duration={target_dur:.3f},setpts=PTS-STARTPTS,subtitles={srt}:force_style='{SUB_STYLE}'[v];"
         f"[1:a]afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out_start:.3f}:d=0.03[a]",
         "-map", "[v]", "-map", "[a]",
@@ -116,4 +284,6 @@ def assemble(edit_dir: Path, *, walkthrough: Path, voiceover: Path, srt: Path, o
         str(out),
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    return out
+    meta["loop_count"] = loop_count
+    meta["effective_target_dur"] = round(target_dur, 3)
+    return meta

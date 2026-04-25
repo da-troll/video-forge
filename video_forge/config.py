@@ -42,3 +42,10 @@ def default_voice() -> str:
 
 def default_instructions() -> str | None:
     return video_forge_config().get("default_instructions")
+
+
+def tail_strategy() -> str:
+    val = video_forge_config().get("tail_strategy", "hold")
+    if val not in {"hold", "loop", "trim_voice"}:
+        return "hold"
+    return val

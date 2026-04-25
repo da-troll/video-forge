@@ -8,6 +8,7 @@ import io
 import wave
 
 from . import get_gemini_key
+from ..references import get_pronunciation_hints
 from .voices_gemini import GEMINI_MODEL_MAP, GEMINI_VOICE_IDS
 
 DEFAULT_MODEL = "gemini-2.5-flash-tts"
@@ -42,6 +43,9 @@ def synthesize(
         prefix_parts.append(audio_tags)
     if instructions:
         prefix_parts.append(instructions)
+    hints = get_pronunciation_hints(text)
+    if hints:
+        prefix_parts.append(hints)
     if prefix_parts:
         prompt_text = f"{'. '.join(prefix_parts)}: {text}"
 

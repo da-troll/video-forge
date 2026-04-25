@@ -5,10 +5,15 @@ so this is new.
 
 from __future__ import annotations
 
+import logging
+
 import requests
 
 from . import get_elevenlabs_key
+from ..references import get_pronunciation_hints
 from .voices_elevenlabs import ELEVENLABS_VOICE_IDS, ELEVENLABS_VOICES
+
+log = logging.getLogger(__name__)
 
 DEFAULT_VOICE = "21m00Tcm4TlvDq8ikWAM"  # Rachel
 DEFAULT_MODEL = "eleven_multilingual_v2"
@@ -37,10 +42,14 @@ def synthesize(
         "model_id": model,
         "voice_settings": {"stability": stability, "similarity_boost": similarity_boost},
     }
-    # ElevenLabs has no native `instructions` field on the synth endpoint —
-    # the modern v3 API supports inline emotion tags but the v1 API does not.
-    # If `instructions` is supplied, prepend it as a parenthetical so it
-    # nudges delivery; not as effective as OpenAI/Gemini, but doesn't error.
+    # ElevenLabs v1 has no native `instructions` field on the synth endpoint —
+    # the modern v3 API supports inline emotion tags but v1 does not. We
+    # prepend any caller `instructions` as a parenthetical (best-effort).
+    # Brand pronunciation hints from the lexicon are intentionally NOT
+    # injected here — log a warning so callers know they're best-effort.
+    hints = get_pronunciation_hints(text)
+    if hints:
+        log.info("brand pronunciation hints not injected for ElevenLabs v1 (best-effort only): %s", hints[:120])
     if instructions:
         payload["text"] = f"({instructions}) {text}"
 

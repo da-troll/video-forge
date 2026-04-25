@@ -7,6 +7,7 @@ from __future__ import annotations
 from openai import OpenAI
 
 from . import get_openai_key
+from ..references import get_pronunciation_hints
 from .voices_openai import OPENAI_VOICE_IDS
 
 # Default model — gpt-4o-mini-tts is the only model that accepts free-form
@@ -36,8 +37,11 @@ def synthesize(
         speed=speed,
         response_format="mp3",
     )
-    if instructions and model == "gpt-4o-mini-tts":
-        kwargs["instructions"] = instructions
+    # Append text-aware pronunciation hints for branded tokens (capped at 400 chars).
+    hints = get_pronunciation_hints(text)
+    merged_instructions = "\n".join(p for p in [instructions, hints] if p) or None
+    if merged_instructions and model == "gpt-4o-mini-tts":
+        kwargs["instructions"] = merged_instructions
     response = client.audio.speech.create(**kwargs)
     audio = b"".join(response.iter_bytes(chunk_size=4096))
     return audio, "audio/mpeg"

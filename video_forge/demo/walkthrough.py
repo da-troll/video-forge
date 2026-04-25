@@ -1,14 +1,23 @@
 """WALKTHROUGH stage — Playwright records a scripted browser session.
 
-Default plan: landing → wait → click first prominent button → wait → screenshot
-focal area → end. The orchestrator can override the scene plan; this module
-just executes it. Output: walkthrough.webm (Playwright native), then re-encoded
-to walkthrough.mp4 by ffmpeg.
+Scene-plan source order:
+  1. Hand-authored override file passed via `scene_plan_override`.
+  2. <project>/edit/scenes.json (left from a prior planner run; user may edit).
+  3. video_forge.demo.scene_planner.plan_scenes() (LLM-driven, MVP-aware).
+  4. _default_scene_plan() — generic CTA hunter, last resort.
+
+Output: walkthrough.webm (Playwright native), re-encoded to walkthrough.mp4.
+
+# TODO v1.1: support a 'wait_for' action with {selector, timeout_ms} for
+# content that loads variably (e.g., LLM-driven UIs where 'tiles ready'
+# takes 5-30s). For now ms_after is a hard timer to avoid Playwright
+# wait_for_selector cliffs.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
 from dataclasses import dataclass, asdict
@@ -16,6 +25,8 @@ from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import Page, sync_playwright
+
+log = logging.getLogger(__name__)
 
 VIDEO_W, VIDEO_H = 1280, 720  # Downscale from 1920x1080 — kinder to a busy VPS, still HD.
 
@@ -67,13 +78,149 @@ def _default_scene_plan(page: Page) -> list[dict[str, Any]]:
     return plan
 
 
-def record(live_url: str, edit_dir: Path, *, max_seconds: int = 18) -> dict:
+def _resolve_scene_plan(
+    live_url: str,
+    edit_dir: Path,
+    *,
+    scene_plan_override: Path | None,
+    project_dir: Path | None,
+    regen_scenes: bool,
+) -> tuple[list[dict] | None, str]:
+    """Pick a scene plan source. Returns (scenes_list, source_label) or (None, "default")."""
+    if scene_plan_override and scene_plan_override.exists():
+        try:
+            data = json.loads(scene_plan_override.read_text(encoding="utf-8"))
+            return data.get("scenes") or data, f"override:{scene_plan_override.name}"
+        except Exception as e:
+            log.warning("scene-plan override unreadable: %s", e)
+
+    scenes_json = edit_dir / "scenes.json"
+    if scenes_json.exists() and not regen_scenes:
+        try:
+            data = json.loads(scenes_json.read_text(encoding="utf-8"))
+            return data.get("scenes") or data, "cached:edit/scenes.json"
+        except Exception as e:
+            log.warning("scenes.json unreadable: %s", e)
+
+    if project_dir is not None:
+        try:
+            from .scene_planner import plan_scenes
+            plan = plan_scenes(project_dir, live_url)
+            if plan and plan.get("scenes"):
+                return plan["scenes"], "scene_planner:llm"
+        except Exception as e:
+            log.warning("scene_planner.plan_scenes raised: %s", e)
+
+    return None, "default"
+
+
+def _execute_scene(page: Page, step: dict, scenes: list[Scene], clock: float) -> float:
+    """Execute one scene from a scenes.json scene; returns the clock value after."""
+    action = step.get("action", "wait")
+    name = step.get("name") or step.get("note") or action
+    note = step.get("note", "")
+
+    started = clock
+    ms_after = int(step.get("ms_after", 0) or 0)
+
+    if action == "wait":
+        ms = int(step.get("ms", step.get("ms_after", 1500)))
+        page.wait_for_timeout(ms)
+        clock += ms / 1000.0
+    elif action == "fill":
+        sel = step.get("selector")
+        text = step.get("text", "")
+        if sel:
+            try:
+                page.locator(sel).first.fill(text, timeout=5000)
+            except Exception as e:
+                log.warning("fill('%s') failed: %s", sel, e)
+        if ms_after:
+            page.wait_for_timeout(ms_after)
+            clock += ms_after / 1000.0
+        else:
+            page.wait_for_timeout(600)
+            clock += 0.6
+    elif action == "click":
+        sel = step.get("selector")
+        if sel:
+            try:
+                page.locator(sel).first.click(timeout=5000)
+            except Exception as e:
+                log.warning("click('%s') failed: %s", sel, e)
+        if ms_after:
+            page.wait_for_timeout(ms_after)
+            clock += ms_after / 1000.0
+        else:
+            page.wait_for_timeout(1500)
+            clock += 1.5
+    elif action == "hover":
+        sel = step.get("selector")
+        if sel:
+            try:
+                page.locator(sel).first.hover(timeout=3000)
+            except Exception as e:
+                log.warning("hover('%s') failed: %s", sel, e)
+        if ms_after:
+            page.wait_for_timeout(ms_after)
+            clock += ms_after / 1000.0
+        else:
+            page.wait_for_timeout(1200)
+            clock += 1.2
+    elif action == "scroll":
+        if step.get("selector"):
+            try:
+                page.locator(step["selector"]).first.scroll_into_view_if_needed(timeout=3000)
+            except Exception as e:
+                log.warning("scroll('%s') failed: %s", step["selector"], e)
+        else:
+            y = int(step.get("y", 0))
+            page.evaluate(f"window.scrollTo({{ top: {y}, behavior: 'smooth' }})")
+        wait = ms_after or 1500
+        page.wait_for_timeout(wait)
+        clock += wait / 1000.0
+    elif action == "screenshot":
+        wait = ms_after or 400
+        page.wait_for_timeout(wait)
+        clock += wait / 1000.0
+    elif action == "scroll_into":  # legacy inline-default plan
+        h = step.get("selector_handle")
+        if h is not None:
+            try:
+                h.scroll_into_view_if_needed()
+            except Exception:
+                pass
+        page.wait_for_timeout(500)
+        clock += 0.5
+    else:
+        log.warning("unknown action '%s' — skipping", action)
+
+    scenes.append(Scene(name=name, start_s=started, end_s=clock, note=note))
+    return clock
+
+
+def record(
+    live_url: str,
+    edit_dir: Path,
+    *,
+    max_seconds: int = 60,
+    project_dir: Path | None = None,
+    scene_plan_override: Path | None = None,
+    regen_scenes: bool = False,
+) -> dict:
     """Record the live URL → edit/walkthrough.mp4. Returns scene metadata."""
     edit_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = edit_dir / "_raw"
     raw_dir.mkdir(exist_ok=True)
     scenes: list[Scene] = []
-    start = 0.0
+
+    plan, plan_source = _resolve_scene_plan(
+        live_url, edit_dir,
+        scene_plan_override=scene_plan_override,
+        project_dir=project_dir,
+        regen_scenes=regen_scenes,
+    )
+    log.info("walkthrough scene-plan source: %s", plan_source)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -84,40 +231,22 @@ def record(live_url: str, edit_dir: Path, *, max_seconds: int = 18) -> dict:
         )
         page = context.new_page()
         page.goto(live_url, timeout=20000)
-        plan = _default_scene_plan(page)
+
+        if plan is None:
+            plan = _default_scene_plan(page)
 
         clock = 0.0
         for step in plan:
-            action = step["action"]
             if clock >= max_seconds:
+                log.info("max_seconds=%s reached, truncating plan at scene '%s'", max_seconds, step.get("name"))
                 break
-            if action == "wait":
-                ms = min(step["ms"], int((max_seconds - clock) * 1000))
-                _wait_settle(page, ms)
-                scenes.append(Scene(name=step.get("note", action), start_s=clock, end_s=clock + ms / 1000.0, note=step.get("note", "")))
-                clock += ms / 1000.0
-            elif action == "scroll_into":
-                target = step["selector_handle"]
-                try:
-                    target.scroll_into_view_if_needed()
-                except Exception:
-                    pass
-                _wait_settle(page, 500)
-                clock += 0.5
-            elif action == "click":
-                target = step["selector_handle"]
-                try:
-                    target.click(timeout=5000)
-                except Exception:
-                    pass
-                scenes.append(Scene(name=step.get("note", "click"), start_s=clock, end_s=clock + 0.3, note=step.get("note", "")))
-                clock += 0.3
-                _wait_settle(page, 500)
-                clock += 0.5
+            clock = _execute_scene(page, step, scenes, clock)
 
-        # Ensure we always reach a stable end frame.
-        if clock < max_seconds:
-            _wait_settle(page, int((max_seconds - clock) * 1000))
+        # Stable end frame — pad to a clean second boundary if we finished early.
+        tail_pad = max(0, int((min(max_seconds, clock + 1.0) - clock) * 1000))
+        if tail_pad > 0:
+            page.wait_for_timeout(tail_pad)
+            clock += tail_pad / 1000.0
 
         page.close()
         context.close()
@@ -160,6 +289,10 @@ def record(live_url: str, edit_dir: Path, *, max_seconds: int = 18) -> dict:
     # Clean up raw webm to save space.
     shutil.rmtree(raw_dir, ignore_errors=True)
 
-    scene_meta = {"duration_s": duration_s, "scenes": [asdict(s) for s in scenes]}
+    scene_meta = {
+        "duration_s": duration_s,
+        "plan_source": plan_source,
+        "scenes": [asdict(s) for s in scenes],
+    }
     (edit_dir / "walkthrough.scenes.json").write_text(json.dumps(scene_meta, indent=2))
     return scene_meta

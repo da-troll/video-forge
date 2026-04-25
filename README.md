@@ -62,11 +62,31 @@ The skill enforces 12 production-correctness rules (subtitles last in the filter
   "default_instructions": null,
   "fallback_chain": ["openai", "gemini", "elevenlabs"],
   "transcription_provider": "elevenlabs",
-  "transcription_fallback_chain": ["elevenlabs", "openai", "gemini"]
+  "transcription_fallback_chain": ["elevenlabs", "openai", "gemini"],
+  "tail_strategy": "hold"
 }
 ```
 
 Voice can be a raw `voice_id` or a saved `profile_id`. Resolved per call.
+
+**Tail strategies** (used when the voiceover is longer than the recorded walkthrough):
+
+| Strategy | Behavior |
+|---|---|
+| `hold` (default) | Extract walkthrough's final frame, generate a silent held-frame video for the gap, concat. Visually less obvious than a loop. |
+| `loop` | Stream-loop the walkthrough until it covers the voiceover. Legacy behavior. |
+| `trim_voice` | Trim the voiceover to the walkthrough length. Debug-only — usually wrong. |
+
+Override at runtime with `--tail-strategy {hold,loop,trim_voice}`.
+
+**Brand lexicon.** `references/brand-lexicon.yaml` is the single source of truth for product names, agent names, and pronunciation hints. It's loaded by `video_forge/references.py` and applied at:
+
+1. **Script draft time** — `brand_voice_rules` are prepended to the LLM system prompt, and the drafted body is run through a quote-safe canonicalization pass (e.g., `Tollefsen product` → `Trollefsen product`, but `"Daniel Tollefsen"` is preserved).
+2. **TTS synth time** — text-aware pronunciation hints are appended to the OpenAI `instructions` field and to the Gemini style prompt. ElevenLabs v1 has no equivalent; brand pronunciation there is best-effort.
+
+Edit `brand-lexicon.yaml` to add new products, agents, or pronunciations.
+
+**Scene planner.** Module mode uses `video_forge/demo/scene_planner.py` to produce an MVP-aware walkthrough plan. The planner does a 5s headless DOM probe + screenshot, sends the result to `gpt-5.4` with a strict JSON schema, and writes `<project>/edit/scenes.json`. The plan is reused on subsequent runs (hand-edit between runs to refine), or use `--regen-scenes` to force a fresh plan. Pass `--scene-plan <path>` to bypass the planner with a hand-authored file. If the planner fails or `gpt-5.4` is unavailable, the recorder falls back to a generic CTA-hunting plan.
 
 ## Install
 

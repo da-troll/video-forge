@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ..config import default_voice
+from ..config import default_voice, tail_strategy as cfg_tail_strategy
 from ..observability import Pipeline
 from ..tts.synth import synthesize_with_fallback
 from . import script as script_stage
@@ -83,8 +83,16 @@ def run(project_dir: Path, options: dict[str, Any] | None = None) -> dict:
 
     # ── 3. WALKTHROUGH ──────────────────────────────────────────────────────
     with pipe.stage("walkthrough") as st:
-        scene_meta = record(live_url, edit_dir, max_seconds=options.get("max_walkthrough_s", 18))
+        scene_meta = record(
+            live_url,
+            edit_dir,
+            max_seconds=options.get("max_walkthrough_s", 60),
+            project_dir=project_dir,
+            scene_plan_override=options.get("scene_plan_override"),
+            regen_scenes=bool(options.get("regen_scenes")),
+        )
         st.extra["scenes"] = scene_meta["scenes"]
+        st.extra["plan_source"] = scene_meta.get("plan_source", "unknown")
         st.extra["walkthrough_duration_s"] = scene_meta["duration_s"]
         walkthrough_mp4 = edit_dir / "walkthrough.mp4"
         st.output_size_bytes = walkthrough_mp4.stat().st_size
@@ -120,13 +128,16 @@ def run(project_dir: Path, options: dict[str, Any] | None = None) -> dict:
         st.extra["srt_cues"] = cue_count
 
         demo_path = edit_dir / "demo.mp4"
-        assemble(
+        chosen_strategy = options.get("tail_strategy") or cfg_tail_strategy()
+        assemble_meta = assemble(
             edit_dir,
             walkthrough=walkthrough_mp4,
             voiceover=voice_path,
             srt=srt_path,
             out=demo_path,
+            tail_strategy=chosen_strategy,
         )
+        st.extra.update(assemble_meta or {})
         st.output_size_bytes = demo_path.stat().st_size
 
     # ── 6. OUTPUT ──────────────────────────────────────────────────────────
@@ -161,13 +172,19 @@ def _cli() -> None:
     p.add_argument("--project", required=True, type=Path, help="Path to ~/projects/nightly-mvps/<slug>/")
     p.add_argument("--voice", help="Override voice / profile id")
     p.add_argument("--instructions", help="Style/tone hint for providers that support it")
-    p.add_argument("--max-walkthrough-s", type=int, default=18)
+    p.add_argument("--max-walkthrough-s", type=int, default=60)
+    p.add_argument("--scene-plan", type=Path, help="Hand-authored scenes.json to bypass the agent")
+    p.add_argument("--regen-scenes", action="store_true", help="Force re-run scene_planner even if scenes.json exists")
+    p.add_argument("--tail-strategy", choices=["hold", "loop", "trim_voice"], help="Override tail strategy from household.json")
     p.add_argument("--gantt", action="store_true", help="Print a Mermaid Gantt at end")
     args = p.parse_args()
     options = {k: v for k, v in {
         "voice": args.voice,
         "instructions": args.instructions,
         "max_walkthrough_s": args.max_walkthrough_s,
+        "scene_plan_override": args.scene_plan,
+        "regen_scenes": args.regen_scenes,
+        "tail_strategy": args.tail_strategy,
     }.items() if v is not None}
     out = run(args.project, options)
     print(json.dumps(out, indent=2))
