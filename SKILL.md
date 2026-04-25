@@ -1,5 +1,5 @@
 ---
-name: video-use
+name: video-forge
 description: Edit any video by conversation. Transcribe, cut, color grade, generate overlay animations, burn subtitles — for talking heads, montages, tutorials, travel, interviews. No presets, no menus. Ask questions, confirm the plan, execute, iterate, persist. Production-correctness rules are hard; everything else is artistic freedom.
 ---
 
@@ -30,13 +30,13 @@ These are the things where deviation produces silent failures or broken output. 
 9. **Cache transcripts per source.** Never re-transcribe unless the source file itself changed.
 10. **Parallel sub-agents for multiple animations.** Never sequential. Spawn N at once via the `Agent` tool; total wall time ≈ slowest one.
 11. **Strategy confirmation before execution.** Never touch the cut until the user has approved the plain-English plan.
-12. **All session outputs in `<videos_dir>/edit/`.** Never write inside the `video-use/` project directory.
+12. **All session outputs in `<videos_dir>/edit/`.** Never write inside the `video-forge/` project directory.
 
 Everything else in this document is a worked example. Deviate whenever the material calls for it.
 
 ## Directory layout
 
-The skill lives in `video-use/`. User footage lives wherever they put it. All session outputs go into `<videos_dir>/edit/`.
+The skill lives in `video-forge/`. User footage lives wherever they put it. All session outputs go into `<videos_dir>/edit/`.
 
 ```
 <videos_dir>/
@@ -59,13 +59,13 @@ The skill lives in `video-use/`. User footage lives wherever they put it. All se
 
 First-time install lives in `install.md` (clone, deps, ffmpeg, skill registration, API key). Don't re-run it every session; on cold start just verify:
 
-- `ELEVENLABS_API_KEY` resolves — either in the environment or in `.env` at the video-use repo root. If missing, ask the user to paste one and write it to `.env` (never to the user's `<videos_dir>`).
+- `ELEVENLABS_API_KEY` resolves — either in the environment or in `.env` at the video-forge repo root. If missing, ask the user to paste one and write it to `.env` (never to the user's `<videos_dir>`).
 - `ffmpeg` + `ffprobe` on PATH.
 - Python deps installed (`uv sync` or `pip install -e .` inside the repo).
 - `yt-dlp`, `manim`, Remotion installed only on first use.
 - This skill vendors `skills/manim-video/`. Read its SKILL.md when building a Manim slot.
 
-Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this SKILL.md. Resolve their paths relative to the directory containing this file — the skill is typically symlinked at `~/.claude/skills/video-use/` or `~/.codex/skills/video-use/`.
+Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this SKILL.md. Resolve their paths relative to the directory containing this file — the skill is typically symlinked at `~/.claude/skills/video-forge/` or `~/.codex/skills/video-forge/`.
 
 ## Helpers
 

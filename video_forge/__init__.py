@@ -1,6 +1,7 @@
-"""video-forge — household additions on top of the upstream video-use skill.
+"""video-forge — module-mode orchestration for the video-forge skill.
 
-Upstream files in /opt/apps/video-forge/ (SKILL.md, helpers/, pyproject.toml,
-etc.) are kept verbatim. Everything in this package is household-specific
-and never modifies upstream.
+The package wraps the skill helpers with multi-provider TTS, a Playwright
+walkthrough recorder, voice profile persistence, and pipeline observability —
+exposing both a CLI (``python -m video_forge.demo``) and a JSON in/out API
+surface for the planned ClawDash UI.
 """
