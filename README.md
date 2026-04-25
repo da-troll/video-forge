@@ -2,6 +2,10 @@
 
 Conversation-driven video editor and demo-reel generator for the household.
 
+<video src="https://github.com/da-troll/video-forge/raw/main/assets/mark-forge-demo.mp4" controls width="100%"></video>
+
+> **Demo above:** [Mark Forge](https://github.com/da-troll/logo-generator) — a household logo generator — fully auto-produced by `python -m video_forge.demo` from nothing but the project's `metadata.json` + `README.md`. ~60s end-to-end, no human in the loop.
+
 Drop a folder of footage and chat with Claude Code to produce `final.mp4`. Or point the orchestrator at a nightly MVP project directory and get a 60–90s demo video — voiceover + walkthrough + subtitles — without lifting a finger.
 
 ## Two modes

@@ -24,7 +24,7 @@ PUNCT_BREAK = set(".,!?;:")
 SUB_STYLE = (
     "FontName=Helvetica,FontSize=18,PrimaryColour=&H00FFFFFF,"
     "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,"
-    "Bold=1,Alignment=2,MarginV=90"
+    "Bold=1,Alignment=2,MarginV=24"
 )
 
 
