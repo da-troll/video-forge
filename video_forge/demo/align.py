@@ -67,6 +67,57 @@ def _audio_duration(audio_path: Path) -> float:
     return float(out.strip() or "0")
 
 
+_SILENCE_END_RE = re.compile(r"silence_end:\s*([0-9.]+)")
+_SILENCE_START_RE = re.compile(r"silence_start:\s*([0-9.]+)")
+
+
+def _detect_speech_onset(audio_path: Path, noise_db: int = -30, min_dur_s: float = 0.05) -> float:
+    """Return the timestamp (seconds) of the first non-silent audio sample.
+
+    Whisper-1 word_timestamps tends to anchor the first word at t=0 even when
+    the audio has natural lead-in silence (TTS engines almost always produce
+    100-400ms of silence before speech). Without correction, every subtitle
+    cue appears 100-400ms before the corresponding spoken word.
+
+    Returns 0.0 if no leading silence is detected (rare for synth voice).
+    """
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats",
+         "-i", str(audio_path),
+         "-af", f"silencedetect=noise={noise_db}dB:d={min_dur_s}",
+         "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    stderr = proc.stderr or ""
+    # First silence_start is at 0 (lead silence). Its silence_end is the
+    # speech onset.
+    first_start_match = _SILENCE_START_RE.search(stderr)
+    if not first_start_match:
+        return 0.0
+    first_start = float(first_start_match.group(1))
+    if first_start > 0.05:
+        # First detected silence isn't at the very start — audio begins with speech.
+        return 0.0
+    end_match = _SILENCE_END_RE.search(stderr)
+    if not end_match:
+        return 0.0
+    return float(end_match.group(1))
+
+
+def _shift_word_timings(words: list[dict], offset_s: float, audio_dur: float) -> list[dict]:
+    """Apply a uniform offset to start/end and clamp to [0, audio_dur]."""
+    if abs(offset_s) < 0.001:
+        return words
+    out: list[dict] = []
+    for w in words:
+        s = max(0.0, w["start"] + offset_s)
+        e = min(audio_dur, w["end"] + offset_s)
+        if e < s:  # never invert
+            e = s
+        out.append({**w, "start": round(s, 3), "end": round(e, 3)})
+    return out
+
+
 def _normalize_for_match(s: str) -> str:
     """Lowercase + strip punctuation for fuzzy comparison only."""
     return re.sub(r"[^a-z0-9]", "", s.lower())
@@ -188,6 +239,17 @@ def align_script_to_audio(
 
     aligned = _align(script_tokens, asr_words, audio_dur)
 
+    # Whisper-anchor correction: detect actual speech onset; if Whisper put
+    # the first word earlier than that, shift everything forward so the SRT
+    # lines up with what the listener actually hears.
+    speech_onset_s = _detect_speech_onset(audio_path)
+    onset_offset_s = 0.0
+    if aligned and speech_onset_s > 0.05:
+        first_aligned_start = aligned[0]["start"]
+        if first_aligned_start < speech_onset_s:
+            onset_offset_s = speech_onset_s - first_aligned_start
+            aligned = _shift_word_timings(aligned, onset_offset_s, audio_dur)
+
     # Drift: distance between last cue end and audio duration.
     last_end = aligned[-1]["end"] if aligned else 0.0
     drift = abs(audio_dur - last_end)
@@ -203,6 +265,8 @@ def align_script_to_audio(
             "script_word_count": len(script_tokens),
             "fallback_used": fallback_used,
             "drift_s": round(drift, 3),
+            "speech_onset_s": round(speech_onset_s, 3),
+            "onset_offset_applied_s": round(onset_offset_s, 3),
         },
     }
     out_json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -214,5 +278,7 @@ def align_script_to_audio(
         "script_word_count": len(script_tokens),
         "alignment_drift_s": round(drift, 3),
         "fallback_used": fallback_used,
+        "speech_onset_s": round(speech_onset_s, 3),
+        "onset_offset_applied_s": round(onset_offset_s, 3),
         "json_path": str(out_json_path),
     }
