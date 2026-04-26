@@ -26,13 +26,24 @@ BASE_SYSTEM = (
     "Mention only features the source material confirms — never invent."
 )
 
+PACING_RULE = (
+    "\n\nThe video has pre-planned VISUAL BEATS (provided by the user). "
+    "Pace your narration so the phrase that describes a beat is being "
+    "spoken AS that beat plays on screen. Cover all major beats in order. "
+    "If a beat is silent action (e.g. waiting for image generation), let "
+    "narration continue across it — don't explicitly say 'wait for it'. "
+    "Do NOT label scenes. Do NOT output headings. Output a clean "
+    "narrator-read script body only."
+)
 
-def _build_system() -> str:
+
+def _build_system(*, with_pacing: bool = False) -> str:
+    base = BASE_SYSTEM + (PACING_RULE if with_pacing else "")
     rules = get_brand_voice_rules()
     if not rules:
-        return BASE_SYSTEM
+        return base
     rules_block = "\n\nBrand voice rules (apply strictly):\n" + "\n".join(f"- {r}" for r in rules)
-    return BASE_SYSTEM + rules_block
+    return base + rules_block
 
 
 def _read_safely(path: Path, max_chars: int = 8000) -> str:
@@ -60,7 +71,33 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     return fm, body
 
 
-def _user_prompt(metadata: dict, readme: str) -> str:
+def _format_scenes(scenes: list[dict]) -> str:
+    """Compact, narration-friendly description of the visual beats."""
+    lines: list[str] = ["\n\nVISUAL BEATS (in order; pace narration to these):"]
+    cumulative = 0.0
+    for i, s in enumerate(scenes, 1):
+        # Best estimate of the beat's on-screen duration.
+        ms = (s.get("ms") or 0) + (s.get("ms_after") or 0)
+        if ms == 0:
+            ms = 1500  # default settle for actions with no explicit timing
+        dur_s = ms / 1000.0
+        action = s.get("action", "wait")
+        name = s.get("name") or s.get("note") or action
+        descriptor_bits = []
+        if s.get("text"):
+            descriptor_bits.append(f"text={s['text']!r}")
+        if s.get("selector"):
+            descriptor_bits.append(f"selector={s['selector']!r}")
+        descriptor = " " + " ".join(descriptor_bits) if descriptor_bits else ""
+        lines.append(
+            f"  {i}. [{cumulative:5.1f}s + {dur_s:4.1f}s] {action.upper()} — {name}{descriptor}"
+        )
+        cumulative += dur_s
+    lines.append(f"\nTotal planned visual length: ~{cumulative:.1f}s.")
+    return "\n".join(lines)
+
+
+def _user_prompt(metadata: dict, readme: str, scenes: list[dict] | None = None) -> str:
     bits = [f"Project name: {metadata.get('project_name') or metadata.get('name') or '(unknown)'}"]
     if metadata.get("description"):
         bits.append(f"\nDescription: {metadata['description']}")
@@ -74,6 +111,8 @@ def _user_prompt(metadata: dict, readme: str) -> str:
         bits.append(f"\nLive URL: {metadata['live_url']}")
     if readme:
         bits.append("\n\nREADME excerpt:\n" + readme[:3500])
+    if scenes:
+        bits.append(_format_scenes(scenes))
     bits.append(
         "\n\nWrite the voiceover script. Output ONLY the script body — "
         "no headings, no scene labels, no markdown — just the words a "
@@ -83,8 +122,17 @@ def _user_prompt(metadata: dict, readme: str) -> str:
     return "\n".join(bits)
 
 
-def draft_script(project_dir: Path) -> tuple[str, dict]:
-    """Returns (body, frontmatter). Frontmatter pulled from existing script.md if present."""
+def draft_script(
+    project_dir: Path,
+    scenes: list[dict] | None = None,
+) -> tuple[str, dict]:
+    """Returns (body, frontmatter).
+
+    If `scenes` is provided, the script is written scene-aware: pacing,
+    references, and visual-beat coverage are baked into both the system
+    and user prompts. Frontmatter is pulled from any pre-existing
+    script.md so author overrides survive re-runs.
+    """
     metadata_path = project_dir / "metadata.json"
     readme_path = project_dir / "README.md"
     script_path = project_dir / "edit" / "script.md"
@@ -106,8 +154,8 @@ def draft_script(project_dir: Path) -> tuple[str, dict]:
     res = client.chat.completions.create(
         model=SCRIPT_MODEL,
         messages=[
-            {"role": "system", "content": _build_system()},
-            {"role": "user", "content": _user_prompt(metadata, readme)},
+            {"role": "system", "content": _build_system(with_pacing=bool(scenes))},
+            {"role": "user", "content": _user_prompt(metadata, readme, scenes)},
         ],
     )
     body = (res.choices[0].message.content or "").strip()

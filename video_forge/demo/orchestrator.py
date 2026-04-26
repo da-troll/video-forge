@@ -16,6 +16,7 @@ from ..tts.synth import synthesize_with_fallback
 from . import script as script_stage
 from .assemble import assemble, build_master_srt
 from .preflight import PreflightError, preflight
+from .scene_planner import plan_scenes as run_scene_planner
 from .walkthrough import record
 
 
@@ -70,13 +71,56 @@ def run(project_dir: Path, options: dict[str, Any] | None = None) -> dict:
                 st.extra["error"] = str(e)
                 raise
 
-    # ── 1. SCRIPT ───────────────────────────────────────────────────────────
+    # ── 1a. PLAN ────────────────────────────────────────────────────────────
+    # Scene plan runs BEFORE the script so narration can pace to visual beats.
+    # If --scene-plan was passed or scenes.json already exists (and --regen-scenes
+    # not set), the existing plan is reused — supports hand-edits between runs.
+    scenes_for_script: list[dict] | None = None
+    with pipe.stage("plan") as st:
+        scenes_path = edit_dir / "scenes.json"
+        override_path: Path | None = options.get("scene_plan_override")
+        regen = bool(options.get("regen_scenes"))
+
+        if override_path and override_path.exists():
+            try:
+                doc = json.loads(override_path.read_text(encoding="utf-8"))
+                scenes_for_script = doc.get("scenes") or doc
+                st.extra["plan_source"] = f"override:{override_path.name}"
+            except Exception as e:
+                st.extra["override_error"] = str(e)
+
+        if scenes_for_script is None and scenes_path.exists() and not regen:
+            try:
+                doc = json.loads(scenes_path.read_text(encoding="utf-8"))
+                scenes_for_script = doc.get("scenes") or doc
+                st.extra["plan_source"] = "cached:edit/scenes.json"
+            except Exception as e:
+                st.extra["cache_error"] = str(e)
+
+        if scenes_for_script is None:
+            try:
+                plan = run_scene_planner(project_dir, live_url)
+                if plan and plan.get("scenes"):
+                    scenes_for_script = plan["scenes"]
+                    st.extra["plan_source"] = "scene_planner:llm"
+                    st.extra["estimated_duration_s"] = plan.get("estimated_duration_s")
+            except Exception as e:
+                st.extra["planner_error"] = str(e)
+
+        if scenes_for_script is None:
+            st.extra["plan_source"] = "default"
+            st.extra["scene_count"] = 0
+        else:
+            st.extra["scene_count"] = len(scenes_for_script)
+
+    # ── 1b. SCRIPT ──────────────────────────────────────────────────────────
     with pipe.stage("script") as st:
-        body, frontmatter = script_stage.draft_script(project_dir)
+        body, frontmatter = script_stage.draft_script(project_dir, scenes=scenes_for_script)
         script_path = script_stage.write_script(project_dir, body, frontmatter)
         st.output_size_bytes = script_path.stat().st_size
         word_count = len(body.split())
         st.extra["word_count"] = word_count
+        st.extra["scene_aware"] = scenes_for_script is not None
 
     # ── 2. TTS ──────────────────────────────────────────────────────────────
     with pipe.stage("tts") as st:
@@ -95,14 +139,18 @@ def run(project_dir: Path, options: dict[str, Any] | None = None) -> dict:
         st.extra["mime"] = mime
 
     # ── 3. WALKTHROUGH ──────────────────────────────────────────────────────
+    # NOTE: project_dir intentionally NOT passed — the plan stage already ran
+    # the LLM. The recorder will only consume the existing scenes.json (or
+    # fall back to its DOM-hunt default plan if neither exists). This keeps
+    # us at exactly one scene-planner LLM call per pipeline run.
     with pipe.stage("walkthrough") as st:
         scene_meta = record(
             live_url,
             edit_dir,
             max_seconds=options.get("max_walkthrough_s", 60),
-            project_dir=project_dir,
+            project_dir=None,
             scene_plan_override=options.get("scene_plan_override"),
-            regen_scenes=bool(options.get("regen_scenes")),
+            regen_scenes=False,
         )
         st.extra["scenes"] = scene_meta["scenes"]
         st.extra["plan_source"] = scene_meta.get("plan_source", "unknown")
