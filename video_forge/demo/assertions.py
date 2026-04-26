@@ -72,12 +72,8 @@ class AssertionMeasurements:
 
 
 def _probe_duration(path: Path) -> float:
-    out = subprocess.check_output(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-        text=True,
-    )
-    return float(out.strip() or "0")
+    from ._ffprobe import media_duration
+    return media_duration(path)
 
 
 _SRT_TS = re.compile(r"(\d{2}):(\d{2}):(\d{2}),(\d{3})")

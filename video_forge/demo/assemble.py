@@ -58,6 +58,55 @@ def _chunk_words(words: list[dict]) -> list[list[dict]]:
     return chunks
 
 
+# Minimum SRT cue display duration. Below this, captions flash too fast to
+# read; assertions also floor at 0.15s. We enforce by extending each cue's
+# end timestamp toward the next cue's start (or +MIN_CUE_S, whichever is
+# sooner). The underlying word-level timings stay honest; only the visible
+# cue is stretched.
+SRT_MIN_CUE_S = 0.20
+
+
+def _enforce_cue_min_duration(cues: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
+    """Ensure visible duration of every cue ≥ SRT_MIN_CUE_S.
+
+    Strategy (in order of preference):
+      1. Stretch this cue's end toward the next cue's start
+      2. If still too short AND there's a next cue: merge with next cue
+         (combined text, end = next.end). The merged cue's duration
+         strictly grows so will pass the floor.
+
+    Operates on (start, end, text) tuples; returns a new list (length may
+    shrink due to merges).
+    """
+    if not cues:
+        return cues
+    out: list[tuple[float, float, str]] = []
+    i = 0
+    while i < len(cues):
+        s, e, t = cues[i]
+        if e - s >= SRT_MIN_CUE_S:
+            out.append((s, e, t))
+            i += 1
+            continue
+        next_start = cues[i + 1][0] if i + 1 < len(cues) else (e + SRT_MIN_CUE_S)
+        stretched_end = min(next_start, s + SRT_MIN_CUE_S)
+        if stretched_end - s >= SRT_MIN_CUE_S:
+            out.append((s, stretched_end, t))
+            i += 1
+            continue
+        # Can't reach the floor by stretching → merge with next cue.
+        if i + 1 < len(cues):
+            ns, ne, nt = cues[i + 1]
+            out.append((s, ne, f"{t} {nt}".strip()))
+            i += 2
+        else:
+            # Last cue and can't extend — emit floored regardless (assertions
+            # may still flag, but that's a signal worth seeing).
+            out.append((s, s + SRT_MIN_CUE_S, t))
+            i += 1
+    return out
+
+
 def _canonicalize_word_stream(words: list[dict]) -> tuple[list[dict], int]:
     """Apply lexicon canonicalize_brand_terms() across the JOINED word stream,
     then redistribute the canonicalized tokens back to per-word records.
@@ -117,25 +166,60 @@ def build_master_srt(transcript_path: Path, srt_path: Path) -> dict:
     canon_words, canon_applied = _canonicalize_word_stream(words)
 
     chunks = _chunk_words(canon_words)
-    lines: list[str] = []
-    for i, chunk in enumerate(chunks, 1):
+
+    # Build raw cue tuples first so we can apply minimum-duration enforcement.
+    raw_cues: list[tuple[float, float, str]] = []
+    for chunk in chunks:
         start = float(chunk[0].get("start", 0.0))
         end = float(chunk[-1].get("end", start + 0.5))
         text = " ".join((w.get("text") or "").strip() for w in chunk).upper()
+        raw_cues.append((start, end, text))
+
+    cues = _enforce_cue_min_duration(raw_cues)
+    stretches = sum(1 for r, c in zip(raw_cues, cues) if c[1] != r[1])
+
+    lines: list[str] = []
+    for i, (s, e, t) in enumerate(cues, 1):
         lines.append(str(i))
-        lines.append(f"{_srt_ts(start)} --> {_srt_ts(end)}")
-        lines.append(text)
+        lines.append(f"{_srt_ts(s)} --> {_srt_ts(e)}")
+        lines.append(t)
         lines.append("")
     srt_path.write_text("\n".join(lines), encoding="utf-8")
-    return {"cue_count": len(chunks), "canonicalizations_applied": canon_applied}
+    return {
+        "cue_count": len(cues),
+        "canonicalizations_applied": canon_applied,
+        "min_duration_stretches": stretches,
+    }
 
 
 def _probe_duration(media: Path) -> float:
+    # Decode-truth duration via shared helper. Format-header was swapped out
+    # because loudnorm-output mp3 headers can lie about their decoded length.
+    from ._ffprobe import media_duration
+    return media_duration(media)
+
+
+def _probe_video_fps(media: Path) -> float:
+    """Return the video stream's frame rate as a float. Returns 25.0 if probing fails."""
     r = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(media)],
-        check=True, stdout=subprocess.PIPE, text=True,
+        ["ffprobe", "-v", "error",
+         "-select_streams", "v:0",
+         "-show_entries", "stream=r_frame_rate",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(media)],
+        capture_output=True, text=True,
     )
-    return float(r.stdout.strip() or "0")
+    out = (r.stdout or "").strip()
+    # r_frame_rate is "num/den"; e.g. "25/1" or "30000/1001".
+    if "/" in out:
+        try:
+            num, den = out.split("/", 1)
+            return float(num) / float(den) if float(den) else 25.0
+        except (ValueError, ZeroDivisionError):
+            pass
+    try:
+        return float(out)
+    except ValueError:
+        return 25.0
 
 
 # Below this gap (seconds), the hold strategy is skipped — a sub-half-second
@@ -164,13 +248,21 @@ def _extract_last_frame(walkthrough: Path, out_png: Path) -> bool:
     return out_png.exists() and out_png.stat().st_size > 0
 
 
-def _build_held_tail(last_png: Path, gap_s: float, out_mp4: Path) -> None:
-    """Encode a silent video of `gap_s` seconds holding `last_png`."""
+def _build_held_tail(last_png: Path, gap_s: float, out_mp4: Path, *, fps: float = 25.0) -> None:
+    """Encode a silent video of `gap_s` seconds holding `last_png` at `fps`.
+
+    Critical: must match the walkthrough's frame rate exactly. concat-demuxer
+    with -c copy reinterprets the held tail's stream PTS at the walkthrough's
+    declared rate, so a mismatch produces visible time-scaling at the seam
+    (the freeze at 0:23 in 63fda3b's demo was caused by 25fps walkthrough
+    concatenated with 30fps held-tail).
+    """
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", str(last_png),
         "-t", f"{gap_s:.3f}",
-        "-r", "30",
+        "-r", str(fps),
+        "-vsync", "cfr",
         "-pix_fmt", "yuv420p",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-an",
@@ -278,7 +370,8 @@ def assemble(
                     target_dur=voice_dur, voice_dur=voice_dur, video_dur=video_dur,
                     meta=meta,
                 )
-            _build_held_tail(held_png, gap, held_mp4)
+            walkthrough_fps = _probe_video_fps(walkthrough)
+            _build_held_tail(held_png, gap, held_mp4, fps=walkthrough_fps)
             if not _concat_demuxer([walkthrough, held_mp4], stitched, edit_dir):
                 meta["concat_method"] = "filter_graph_fallback"
                 _concat_filter_graph([walkthrough, held_mp4], stitched)
@@ -286,6 +379,7 @@ def assemble(
                 meta["concat_method"] = "demuxer_copy"
             composed_video = stitched
             meta["held_frame_path"] = str(held_png)
+            meta["walkthrough_fps"] = round(walkthrough_fps, 3)
             meta["effective_target_dur"] = round(voice_dur, 3)
 
     target_dur = (
