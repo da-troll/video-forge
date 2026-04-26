@@ -20,6 +20,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from ..references import canonicalize_brand_terms
+
 PUNCT_BREAK = set(".,!?;:")
 SUB_STYLE = (
     "FontName=Helvetica,FontSize=18,PrimaryColour=&H00FFFFFF,"
@@ -56,10 +58,65 @@ def _chunk_words(words: list[dict]) -> list[list[dict]]:
     return chunks
 
 
-def build_master_srt(transcript_path: Path, srt_path: Path) -> int:
+def _canonicalize_word_stream(words: list[dict]) -> tuple[list[dict], int]:
+    """Apply lexicon canonicalize_brand_terms() across the JOINED word stream,
+    then redistribute the canonicalized tokens back to per-word records.
+
+    Why not per-cue: the 2-word chunker can split a multi-word rule pattern
+    ("Tollefsen household") into separate cues, so per-cue canon misses it.
+    Word-count-preserving substitution rules in brand-lexicon.yaml guarantee
+    that token count is invariant — so we can splice the new tokens back to
+    the original word records by index.
+
+    Returns (mutated_words, replacements_count). Original timing/type
+    metadata is preserved on each word; only `text` may change.
+    """
+    if not words:
+        return [], 0
+    joined = " ".join((w.get("text") or "") for w in words)
+    canon = canonicalize_brand_terms(joined)
+    if canon == joined:
+        return words, 0
+    new_tokens = canon.split(" ")
+    replacements = 0
+    if len(new_tokens) != len(words):
+        # Unexpected — rules should be word-count-preserving. Fall back to
+        # per-word leaving original; logged via the returned 0 count.
+        return words, 0
+    out: list[dict] = []
+    for w, new_text in zip(words, new_tokens):
+        if (w.get("text") or "") != new_text:
+            replacements += 1
+            out.append({**w, "text": new_text})
+        else:
+            out.append(w)
+    return out, replacements
+
+
+def build_master_srt(transcript_path: Path, srt_path: Path) -> dict:
+    """Build the burned-in SRT from a Scribe-shaped transcript.
+
+    Pipeline (the canonicalization order matters):
+      1. canonicalize the FULL word stream (multi-word rules can span cues —
+         must run before chunking, or "Tollefsen household" rules miss when
+         the chunker split them apart)
+      2. group word records into 2-word chunks, breaking on punctuation
+      3. join each chunk to source-cased text
+      4. uppercase + write
+
+    Canonicalization is the last line of defense after script-side voice
+    rules (Item B) and script-substitution alignment (Item C). Most of the
+    time it should fire 0 times; it exists for the regression case where
+    the script writer accidentally regresses to "Tollefsen household".
+
+    Returns {cue_count, canonicalizations_applied} for pipeline.log.json.
+    """
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
     words = [w for w in transcript.get("words", []) if w.get("type") == "word"]
-    chunks = _chunk_words(words)
+
+    canon_words, canon_applied = _canonicalize_word_stream(words)
+
+    chunks = _chunk_words(canon_words)
     lines: list[str] = []
     for i, chunk in enumerate(chunks, 1):
         start = float(chunk[0].get("start", 0.0))
@@ -70,7 +127,7 @@ def build_master_srt(transcript_path: Path, srt_path: Path) -> int:
         lines.append(text)
         lines.append("")
     srt_path.write_text("\n".join(lines), encoding="utf-8")
-    return len(chunks)
+    return {"cue_count": len(chunks), "canonicalizations_applied": canon_applied}
 
 
 def _probe_duration(media: Path) -> float:

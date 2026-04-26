@@ -178,8 +178,9 @@ def run(project_dir: Path, options: dict[str, Any] | None = None) -> dict:
     # ── 5. SRT + ASSEMBLE (honors upstream Hard Rules where they apply) ────
     with pipe.stage("assemble") as st:
         srt_path = edit_dir / "demo.srt"
-        cue_count = build_master_srt(transcript_path, srt_path)
-        st.extra["srt_cues"] = cue_count
+        srt_meta = build_master_srt(transcript_path, srt_path)
+        st.extra["srt_cues"] = srt_meta["cue_count"]
+        st.extra["srt_canonicalizations"] = srt_meta["canonicalizations_applied"]
 
         demo_path = edit_dir / "demo.mp4"
         chosen_strategy = options.get("tail_strategy") or cfg_tail_strategy()
