@@ -158,29 +158,22 @@ def run(project_dir: Path, options: dict[str, Any] | None = None) -> dict:
         walkthrough_mp4 = edit_dir / "walkthrough.mp4"
         st.output_size_bytes = walkthrough_mp4.stat().st_size
 
-    # ── 4. TRANSCRIBE (upstream helper, unchanged) ─────────────────────────
+    # ── 4. ALIGN (script-as-truth; Whisper-1 only for word boundaries) ────
+    # Script-substitution forced alignment: Whisper provides word-level
+    # timings; we substitute the actual script tokens. The emitted JSON
+    # mirrors Scribe's shape so build_master_srt is unchanged.
     transcripts_dir = edit_dir / "transcripts"
     transcripts_dir.mkdir(exist_ok=True)
-    with pipe.stage("transcribe") as st:
-        transcribe = _import_helper("transcribe")
-        # transcribe.transcribe_one expects a video; voice_path is audio. Scribe
-        # accepts audio uploads — call call_scribe directly with the audio file.
-        # Falls back to running upstream's CLI which extracts via ffmpeg first.
-        api_key = transcribe.load_api_key()
-        # Extract a 16k mono wav from the voiceover so Scribe gets the same
-        # input shape as upstream's CLI path.
-        audio_for_scribe = edit_dir / "voiceover_16k.wav"
-        import subprocess as sp
-        sp.run([
-            "ffmpeg", "-y", "-i", str(voice_path),
-            "-ac", "1", "-ar", "16000", str(audio_for_scribe),
-        ], check=True, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
-
-        transcript = transcribe.call_scribe(audio_for_scribe, api_key)
-        transcript_path = transcripts_dir / "voiceover.json"
-        transcript_path.write_text(json.dumps(transcript, indent=2))
+    transcript_path = transcripts_dir / "voiceover.json"
+    with pipe.stage("align") as st:
+        from .align import align_script_to_audio
+        align_meta = align_script_to_audio(
+            script_text=body,
+            audio_path=voice_path,
+            out_json_path=transcript_path,
+        )
         st.output_size_bytes = transcript_path.stat().st_size
-        st.extra["word_count"] = sum(1 for w in transcript.get("words", []) if w.get("type") == "word")
+        st.extra.update(align_meta)
 
     # ── 5. SRT + ASSEMBLE (honors upstream Hard Rules where they apply) ────
     with pipe.stage("assemble") as st:
