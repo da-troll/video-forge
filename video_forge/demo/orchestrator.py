@@ -138,6 +138,29 @@ def run(project_dir: Path, options: dict[str, Any] | None = None) -> dict:
         st.extra["voice"] = voice
         st.extra["mime"] = mime
 
+    # ── 2b. LOUDNORM (two-pass) ────────────────────────────────────────────
+    # Normalize voiceover to broadcast standard (-14 LUFS / -1 dBTP / 11 LU).
+    # Runs before align so Whisper sees the normalized audio + downstream
+    # assemble's filter chain doesn't need to add yet another loudnorm step.
+    with pipe.stage("loudnorm") as st:
+        from .loudnorm import apply_loudnorm_two_pass_audio
+        normalized_path = voice_path.with_name(voice_path.stem + ".normalized" + voice_path.suffix)
+        result = apply_loudnorm_two_pass_audio(voice_path, normalized_path)
+        st.extra.update({
+            "ok": result["ok"],
+            "fallback_used": result.get("fallback_used", False),
+            "target_lufs": result["target"]["I"],
+            "measured_in_i": result["measured_in"]["input_i"] if result.get("measured_in") else None,
+            "measured_in_tp": result["measured_in"]["input_tp"] if result.get("measured_in") else None,
+            "measured_out_lufs": result.get("measured_out_lufs"),
+        })
+        if result["ok"] and normalized_path.exists():
+            voice_path = normalized_path
+            st.output_size_bytes = normalized_path.stat().st_size
+        else:
+            # Continue with un-normalized audio rather than failing the run.
+            st.extra["error"] = result.get("error", "loudnorm produced no output")
+
     # ── 3. WALKTHROUGH ──────────────────────────────────────────────────────
     # NOTE: project_dir intentionally NOT passed — the plan stage already ran
     # the LLM. The recorder will only consume the existing scenes.json (or
