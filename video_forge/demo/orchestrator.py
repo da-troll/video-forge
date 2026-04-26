@@ -218,6 +218,25 @@ def run(project_dir: Path, options: dict[str, Any] | None = None) -> dict:
         st.extra.update(assemble_meta or {})
         st.output_size_bytes = demo_path.stat().st_size
 
+    # ── 5b. ASSERTIONS — quality gate before publishing ─────────────────────
+    # Cheap, no-LLM checks: file size, duration bounds, SRT integrity, lead
+    # silence, tail drift, integrated LUFS. Failure raises and aborts the run
+    # BEFORE the demo is copied to the public path or metadata.json is updated.
+    with pipe.stage("assertions") as st:
+        from .assertions import AssertionFailed, assert_demo_quality
+        try:
+            measurements = assert_demo_quality(
+                demo_path=demo_path,
+                srt_path=srt_path,
+                voiceover_path=voice_path,
+            )
+            st.extra.update(measurements)
+            st.extra["passed"] = True
+        except AssertionFailed as e:
+            st.extra["passed"] = False
+            st.extra["failures"] = str(e)
+            raise
+
     # ── 6. OUTPUT ──────────────────────────────────────────────────────────
     with pipe.stage("output") as st:
         slug = _slug(project_dir)
