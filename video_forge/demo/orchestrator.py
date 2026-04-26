@@ -15,6 +15,7 @@ from ..observability import Pipeline
 from ..tts.synth import synthesize_with_fallback
 from . import script as script_stage
 from .assemble import assemble, build_master_srt
+from .preflight import PreflightError, preflight
 from .walkthrough import record
 
 
@@ -56,6 +57,18 @@ def run(project_dir: Path, options: dict[str, Any] | None = None) -> dict:
     live_url = options.get("live_url") or metadata.get("live_url")
     if not live_url:
         raise RuntimeError(f"no live_url in metadata.json or options for {project_dir.name}")
+
+    # ── 0. PREFLIGHT ────────────────────────────────────────────────────────
+    # Runs BEFORE any LLM/TTS spend. Aborts cleanly on broken live URLs.
+    if not options.get("skip_preflight"):
+        with pipe.stage("preflight") as st:
+            try:
+                project_hint = metadata.get("project_name") or project_dir.name
+                pf = preflight(live_url, project_hint=project_hint)
+                st.extra.update(pf.as_dict())
+            except PreflightError as e:
+                st.extra["error"] = str(e)
+                raise
 
     # ── 1. SCRIPT ───────────────────────────────────────────────────────────
     with pipe.stage("script") as st:
@@ -175,6 +188,7 @@ def _cli() -> None:
     p.add_argument("--max-walkthrough-s", type=int, default=60)
     p.add_argument("--scene-plan", type=Path, help="Hand-authored scenes.json to bypass the agent")
     p.add_argument("--regen-scenes", action="store_true", help="Force re-run scene_planner even if scenes.json exists")
+    p.add_argument("--skip-preflight", action="store_true", help="Skip preflight check (debug only)")
     p.add_argument("--tail-strategy", choices=["hold", "loop", "trim_voice"], help="Override tail strategy from household.json")
     p.add_argument("--gantt", action="store_true", help="Print a Mermaid Gantt at end")
     args = p.parse_args()
@@ -185,6 +199,7 @@ def _cli() -> None:
         "scene_plan_override": args.scene_plan,
         "regen_scenes": args.regen_scenes,
         "tail_strategy": args.tail_strategy,
+        "skip_preflight": args.skip_preflight or None,
     }.items() if v is not None}
     out = run(args.project, options)
     print(json.dumps(out, indent=2))
