@@ -40,6 +40,23 @@ def default_voice() -> str:
     return video_forge_config().get("default_voice", "alloy")
 
 
+def default_speed() -> float:
+    """TTS speed multiplier, applied at synth time.
+
+    Default 1.15 (mild speed-up) — empirically tightens local sync between
+    visual scenes and narration without sounding rushed. Override in
+    household.json under skills.video_forge.default_speed if 1.0 (natural)
+    or 1.25 (faster) suits a particular project better. Range: 0.25-4.0
+    per OpenAI TTS spec.
+    """
+    val = video_forge_config().get("default_speed", 1.15)
+    try:
+        speed = float(val)
+    except (TypeError, ValueError):
+        return 1.15
+    return max(0.25, min(4.0, speed))
+
+
 def default_instructions() -> str | None:
     return video_forge_config().get("default_instructions")
 

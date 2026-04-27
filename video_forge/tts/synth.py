@@ -10,7 +10,7 @@ import importlib
 import logging
 from typing import Optional
 
-from ..config import default_instructions, default_voice, fallback_chain
+from ..config import default_instructions, default_speed, default_voice, fallback_chain
 from . import has_key
 from .catalog import find_voice
 from .profiles import get_profile
@@ -58,6 +58,7 @@ def synthesize_with_fallback(
     voice: Optional[str] = None,
     instructions: Optional[str] = None,
     chain: Optional[list[str]] = None,
+    speed: Optional[float] = None,
 ) -> tuple[bytes, str, str, list[dict]]:
     """Synthesize text to audio, walking the fallback chain on failure.
 
@@ -74,6 +75,7 @@ def synthesize_with_fallback(
 
     hinted_provider, resolved_voice, resolved_instructions = _resolve_voice_or_profile(voice or default_voice())
     instructions = instructions or resolved_instructions or default_instructions()
+    speed = speed if speed is not None else default_speed()
 
     # If the resolved voice belongs to a specific provider, try that first
     # regardless of chain order — but still walk the rest of the chain on failure.
@@ -108,12 +110,22 @@ def synthesize_with_fallback(
             voice_for_provider = PROVIDER_DEFAULT_VOICE[provider]
 
         try:
+            # Only OpenAI's TTS adapter accepts a `speed` kwarg (gpt-4o-mini-tts
+            # supports 0.25-4.0). Gemini/ElevenLabs adapters reject unknown
+            # kwargs, so we only thread speed for OpenAI; the others fall back
+            # to natural pace. If non-OpenAI becomes primary, post-process
+            # with ffmpeg atempo here.
+            extra: dict = {"speed": speed} if provider == "openai" and speed != 1.0 else {}
             audio, mime = adapter.synthesize(
                 text,
                 voice=voice_for_provider,
                 instructions=instructions,
+                **extra,
             )
-            log_entries.append({"provider": provider, "ok": True, "voice": voice_for_provider, "bytes": len(audio)})
+            log_entries.append({
+                "provider": provider, "ok": True, "voice": voice_for_provider,
+                "bytes": len(audio), "speed": extra.get("speed", 1.0),
+            })
             return audio, mime, provider, log_entries
         except Exception as e:
             log.warning("provider %s failed: %s", provider, e)
