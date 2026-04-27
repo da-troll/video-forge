@@ -128,19 +128,32 @@ def _execute_scene(page: Page, step: dict, scenes: list[Scene], clock: float) ->
         page.wait_for_timeout(ms)
         clock += ms / 1000.0
     elif action == "fill":
+        # Use press_sequentially (not .fill()) so the field is visibly typed
+        # frame-by-frame during recording. .fill() sets the value atomically,
+        # which makes the field appear pre-populated — no typing animation.
+        # Clear first in case the field has any residual state, then focus + type.
         sel = step.get("selector")
         text = step.get("text", "")
+        type_delay_ms = int(step.get("type_delay_ms", 55))  # ~18 chars/sec
         if sel:
             try:
-                page.locator(sel).first.fill(text, timeout=5000)
+                loc = page.locator(sel).first
+                loc.fill("", timeout=5000)        # clear
+                loc.click(timeout=3000)            # focus (caret visible)
+                loc.press_sequentially(text, delay=type_delay_ms, timeout=15000)
             except Exception as e:
-                log.warning("fill('%s') failed: %s", sel, e)
+                log.warning("type('%s') failed: %s", sel, e)
         if ms_after:
             page.wait_for_timeout(ms_after)
             clock += ms_after / 1000.0
         else:
+            # Settle pause after typing finishes.
             page.wait_for_timeout(600)
             clock += 0.6
+        # press_sequentially blocks for len(text)*delay; account for it on the clock.
+        if sel and text:
+            typed_s = (len(text) * type_delay_ms) / 1000.0
+            clock += typed_s
     elif action == "click":
         sel = step.get("selector")
         if sel:

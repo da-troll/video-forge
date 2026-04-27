@@ -1,6 +1,6 @@
 [project]
 name = "video-forge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Conversation-driven video editor and demo-reel generator for the household"
 requires-python = ">=3.10"
 dependencies = [

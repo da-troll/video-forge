@@ -10,8 +10,9 @@ voiceover). We honor the upstream Hard Rules where they apply:
             no segment offsets needed)
   - Rule 8: word-level Scribe transcript (verbatim, untouched)
 
-Subtitle force_style mirrors render.py exactly (2-word UPPERCASE chunks,
-Helvetica 18 Bold, MarginV=90 — the proven 1920×1080 / 1080×1920 setting).
+Subtitle force_style: phrase-length UPPERCASE chunks (~5 words, punctuation-broken),
+Helvetica 14 Bold, MarginV=24. Wider chunks reduce sync-checkpoint perception
+vs the prior 2-word style — fewer cue boundaries, longer reading windows.
 """
 
 from __future__ import annotations
@@ -23,8 +24,12 @@ from pathlib import Path
 from ..references import canonicalize_brand_terms
 
 PUNCT_BREAK = set(".,!?;:")
+# Target words per SRT cue. 2-word chunks felt sparse and over-emphasized
+# every minor desync; ~5-word phrasing gives natural caption rhythm and
+# longer per-cue dwell. Punctuation always closes a cue early.
+SUB_CHUNK_WORDS = 5
 SUB_STYLE = (
-    "FontName=Helvetica,FontSize=18,PrimaryColour=&H00FFFFFF,"
+    "FontName=Helvetica,FontSize=14,PrimaryColour=&H00FFFFFF,"
     "OutlineColour=&H00000000,BorderStyle=1,Outline=1.2,Shadow=0,"
     "Bold=1,Alignment=2,MarginV=24,WrapStyle=2"
 )
@@ -39,7 +44,8 @@ def _srt_ts(seconds: float) -> str:
 
 
 def _chunk_words(words: list[dict]) -> list[list[dict]]:
-    """Group word records into 2-word UPPERCASE chunks, breaking on punctuation."""
+    """Group word records into phrase-length UPPERCASE chunks (~SUB_CHUNK_WORDS),
+    closing a chunk early on terminal punctuation so phrases break naturally."""
     chunks: list[list[dict]] = []
     current: list[dict] = []
     for w in words:
@@ -50,7 +56,7 @@ def _chunk_words(words: list[dict]) -> list[list[dict]]:
             continue
         current.append(w)
         ends_in_punct = text[-1] in PUNCT_BREAK
-        if len(current) >= 2 or ends_in_punct:
+        if len(current) >= SUB_CHUNK_WORDS or ends_in_punct:
             chunks.append(current)
             current = []
     if current:
