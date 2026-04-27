@@ -57,7 +57,18 @@ SYSTEM_PROMPT = (
     "and to wait for slow async operations like LLM calls or image "
     "generation).\n"
     "5. Open with a 2-3s 'land' wait scene. Close with a 'scroll' or "
-    "'hover' on a key result, not abruptly mid-action."
+    "'hover' on a key result, not abruptly mid-action.\n"
+    "6. PACING — minimum dwell times (the demo must NOT feel rushed; "
+    "narration must have time to describe each beat):\n"
+    "   - Every 'wait' scene: ms ≥ 4000.\n"
+    "   - Every action scene (click/hover/fill/scroll/screenshot): "
+    "ms_after ≥ 3000.\n"
+    "   - Total walkthrough should land at 30-45s, not 15-25s.\n"
+    "7. OBSERVATION BEATS — after EVERY action scene (click/fill/hover), "
+    "insert a brief 'wait' scene with ms=2500 and a note describing what "
+    "the viewer should NOTICE about the result. This gives the eye time "
+    "to register what changed before moving on. Skip only if the next "
+    "action is on the same target element."
 )
 
 PLAN_SCHEMA = {
@@ -169,6 +180,28 @@ def _atomic_write(path: Path, content: str) -> None:
             os.unlink(tmp_name)
 
 
+# Pacing floors — enforced regardless of what the LLM emits. See
+# SYSTEM_PROMPT rule 6 for the full rationale: short dwells produce
+# walkthroughs that race ahead of the narration. Belt + suspenders with
+# the prompt instruction.
+MIN_WAIT_MS = 4000
+MIN_MS_AFTER_FOR_ACTIONS = 3000
+
+
+def _enforce_pacing_floors(scene: dict) -> dict:
+    """Lift any too-short dwell times to the configured floors."""
+    action = scene.get("action")
+    if action == "wait":
+        ms = int(scene.get("ms") or 0)
+        if ms < MIN_WAIT_MS:
+            scene["ms"] = MIN_WAIT_MS
+    elif action in ("click", "hover", "fill", "scroll", "screenshot"):
+        ms_after = int(scene.get("ms_after") or 0)
+        if ms_after < MIN_MS_AFTER_FOR_ACTIONS:
+            scene["ms_after"] = MIN_MS_AFTER_FOR_ACTIONS
+    return scene
+
+
 def _normalize_plan(raw: dict, live_url: str) -> dict:
     """Tag the LLM output with metadata fields the schema doesn't enforce, drop bad scenes."""
     from datetime import datetime, timezone
@@ -177,13 +210,20 @@ def _normalize_plan(raw: dict, live_url: str) -> dict:
     for s in scenes_in:
         if s.get("action") not in VALID_ACTIONS:
             continue
-        # Drop null fields so the on-disk file is tidy.
-        scenes_out.append({k: v for k, v in s.items() if v is not None})
+        # Drop null fields so the on-disk file is tidy, then enforce floors.
+        clean = {k: v for k, v in s.items() if v is not None}
+        scenes_out.append(_enforce_pacing_floors(clean))
+    # Recompute estimated_duration_s from the floor-corrected scenes so it
+    # reflects what will actually be recorded.
+    estimated = sum(
+        ((s.get("ms") or 0) + (s.get("ms_after") or 0)) / 1000.0
+        for s in scenes_out
+    )
     return {
         "version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "live_url": live_url,
-        "estimated_duration_s": float(raw.get("estimated_duration_s", 45.0)),
+        "estimated_duration_s": round(max(estimated, float(raw.get("estimated_duration_s", 45.0))), 1),
         "scenes": scenes_out,
     }
 
