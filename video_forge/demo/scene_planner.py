@@ -59,11 +59,13 @@ SYSTEM_PROMPT = (
     "5. Open with a 2-3s 'land' wait scene. Close with a 'scroll' or "
     "'hover' on a key result, not abruptly mid-action.\n"
     "6. PACING — minimum dwell times (the demo must NOT feel rushed):\n"
-    "   - Every 'wait' scene: ms ≥ 2500.\n"
+    "   - Every 'wait' scene: ms ≥ 4000.\n"
     "   - Every action scene (click/hover/fill/scroll/screenshot): "
-    "ms_after ≥ 1500.\n"
-    "   - Total walkthrough should land at 50-75s (use 12-18 scenes "
-    "with ~3-5s avg dwell to hit this range).\n"
+    "ms_after ≥ 3500.\n"
+    "   - Total walkthrough should land at 50-75s. Use 12-18 scenes; the "
+    "sum of all ms + ms_after across all scenes MUST equal the total. "
+    "Do NOT rely on an inflated estimated_duration_s; the orchestrator "
+    "validates by summing per-scene ms+ms_after.\n"
     "7. OBSERVATION BEATS — after EVERY action scene (click/fill/hover), "
     "insert a brief 'wait' scene with ms=2500 and a note describing what "
     "the viewer should NOTICE about the result. Skip only if the next "
@@ -183,8 +185,8 @@ def _atomic_write(path: Path, content: str) -> None:
 # SYSTEM_PROMPT rule 6 for the full rationale: short dwells produce
 # walkthroughs that race ahead of the narration. Belt + suspenders with
 # the prompt instruction.
-MIN_WAIT_MS = 2500
-MIN_MS_AFTER_FOR_ACTIONS = 1500
+MIN_WAIT_MS = 4000
+MIN_MS_AFTER_FOR_ACTIONS = 3500
 
 
 def _enforce_pacing_floors(scene: dict) -> dict:
@@ -212,8 +214,12 @@ def _normalize_plan(raw: dict, live_url: str) -> dict:
         # Drop null fields so the on-disk file is tidy, then enforce floors.
         clean = {k: v for k, v in s.items() if v is not None}
         scenes_out.append(_enforce_pacing_floors(clean))
-    # Recompute estimated_duration_s from the floor-corrected scenes so it
-    # reflects what will actually be recorded.
+    # Recompute estimated_duration_s as the PURE sum of scene dwells.
+    # The LLM's self-reported estimated_duration_s is unreliable —
+    # MemPalace 2026-04-27 shipped a plan claiming 57s while the actual
+    # scene sums totalled 27.9s. We trust the scene sums, not the LLM's
+    # number. (Typing/click latency adds ~3-5s on top, but downstream
+    # consumers should treat this as a lower bound.)
     estimated = sum(
         ((s.get("ms") or 0) + (s.get("ms_after") or 0)) / 1000.0
         for s in scenes_out
@@ -222,7 +228,7 @@ def _normalize_plan(raw: dict, live_url: str) -> dict:
         "version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "live_url": live_url,
-        "estimated_duration_s": round(max(estimated, float(raw.get("estimated_duration_s", 45.0))), 1),
+        "estimated_duration_s": round(estimated, 1),
         "scenes": scenes_out,
     }
 
