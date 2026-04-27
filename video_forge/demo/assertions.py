@@ -25,7 +25,7 @@ from pathlib import Path
 from .loudnorm import measure_integrated_lufs
 
 # ── tunables ────────────────────────────────────────────────────────────
-MIN_DEMO_LEN_S = 30.0          # generously short — nightly MVPs vary
+MIN_DEMO_LEN_S = 15.0          # generously short — nightly MVPs vary
 MAX_DEMO_LEN_S = 120.0         # if longer, narration probably ran on
 MIN_DEMO_BYTES = 250_000       # ~0.25 MB — anything smaller is broken mp4
 MAX_DEMO_BYTES = 200_000_000   # 200 MB — far above realistic demo size
@@ -33,6 +33,10 @@ MIN_CUE_DURATION_S = 0.15
 MAX_CUE_DURATION_S = 8.0
 MAX_LEAD_SILENCE_S = 1.5       # SRT first-cue start must be ≤ this
 MAX_TAIL_DRIFT_S = 1.5         # |voice_dur − last_cue_end| must be ≤ this
+MAX_TAIL_GAP_S = 12.0          # held-tail filler must be ≤ this — beyond
+                               # this the narration wildly outran the
+                               # walkthrough and the demo is mostly a
+                               # frozen frame
 LUFS_TARGET = -14.0
 LUFS_TOLERANCE = 1.5           # final demo within ±1.5 LU of target
 
@@ -109,6 +113,7 @@ def assert_demo_quality(
     demo_path: Path,
     srt_path: Path,
     voiceover_path: Path,
+    tail_gap_s: float | None = None,
 ) -> dict:
     """Run all quality assertions. Raises AssertionFailed on the first
     violation. Returns the measurement dict for pipeline.log.json on success.
@@ -169,6 +174,13 @@ def assert_demo_quality(
         failures.append(
             f"last cue end {last_end:.2f}s drifts {drift:.2f}s from voice {voice_dur:.2f}s "
             f"(> {MAX_TAIL_DRIFT_S}s)"
+        )
+
+    # ── tail-gap (narration vs walkthrough mismatch) ─────────────────────
+    if tail_gap_s is not None and tail_gap_s > MAX_TAIL_GAP_S:
+        failures.append(
+            f"tail_gap_s {tail_gap_s:.2f}s > max {MAX_TAIL_GAP_S}s "
+            "(walkthrough far shorter than narration; demo is mostly a frozen frame)"
         )
 
     # ── loudness ─────────────────────────────────────────────────────────

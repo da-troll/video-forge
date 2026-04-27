@@ -232,6 +232,7 @@ def run(project_dir: Path, options: dict[str, Any] | None = None) -> dict:
             measurements = assert_demo_quality(
                 demo_path=demo_path,
                 srt_path=srt_path,
+                tail_gap_s=(assemble_meta or {}).get("tail_gap_s"),
                 voiceover_path=voice_path,
             )
             st.extra.update(measurements)

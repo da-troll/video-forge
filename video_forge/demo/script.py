@@ -1,7 +1,8 @@
 """SCRIPT stage — agent drafts a 3-act voiceover script.md from project facts.
 
 Inputs: metadata.json, README.md, optional source comments.
-Output: script.md with optional frontmatter + 150–220 word body.
+Output: script.md with optional frontmatter + 50–80 word body
+(~20–32s of voiceover at narrator pace).
 """
 
 from __future__ import annotations
@@ -18,12 +19,14 @@ from ..tts import get_openai_key
 SCRIPT_MODEL = "gpt-5.4"
 
 BASE_SYSTEM = (
-    "You are a senior product video scriptwriter. You write a single short "
-    "voiceover script in three acts: HOOK (8–12 seconds), WALKTHROUGH "
-    "(35–55 seconds), CLOSE (5–10 seconds). Total length must be 150–220 "
-    "spoken words (~60–90 seconds at narrator pace). The voice is "
-    "confident, plain, and concrete. NO marketing fluff. NO superlatives. "
-    "Mention only features the source material confirms — never invent."
+    "You are a senior product video scriptwriter. You write one short, "
+    "continuous voiceover for a product demo reel. Total length MUST be "
+    "50–80 spoken words (~20–32 seconds at narrator pace). No 3-act "
+    "structure, no act labels, no opening hook — narration starts at the "
+    "first visual beat and describes what's happening on screen. The "
+    "voice is confident, plain, and concrete. NO marketing fluff. NO "
+    "superlatives. Mention only features the source material confirms — "
+    "never invent. If you exceed the word budget, the demo will desync."
 )
 
 PACING_RULE = (
@@ -116,8 +119,9 @@ def _user_prompt(metadata: dict, readme: str, scenes: list[dict] | None = None) 
     bits.append(
         "\n\nWrite the voiceover script. Output ONLY the script body — "
         "no headings, no scene labels, no markdown — just the words a "
-        "narrator will read. 150 to 220 words. Three acts blend "
-        "naturally; do not label them."
+        "narrator will read. STRICT BUDGET: 50 to 80 words. Open on the "
+        "first visual beat, not on a hook. Close on the last visual beat, "
+        "not on a sign-off."
     )
     return "\n".join(bits)
 
