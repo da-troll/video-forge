@@ -243,26 +243,38 @@ def run(project_dir: Path, options: dict[str, Any] | None = None) -> dict:
             raise
 
     # ── 6. OUTPUT ──────────────────────────────────────────────────────────
+    # Versioned filenames defeat browser/CDN cache ambiguity. Each run
+    # writes demo-<run_id>.mp4 (run_id is the orchestrator's start
+    # timestamp); metadata.demo_video_url points to the versioned file.
+    # We also maintain a demo.mp4 copy as a "latest" pointer for tooling
+    # that expects a stable name (gallery thumbnailing, etc.).
     with pipe.stage("output") as st:
         slug = _slug(project_dir)
         shared_dir = SHARED_MEDIA_ROOT / slug
         shared_dir.mkdir(parents=True, exist_ok=True)
-        shared_demo = shared_dir / "demo.mp4"
-        shutil.copy2(demo_path, shared_demo)
+        versioned_name = f"demo-{pipe.run_id}.mp4"
+        shared_versioned = shared_dir / versioned_name
+        shared_latest = shared_dir / "demo.mp4"
+        shutil.copy2(demo_path, shared_versioned)
+        shutil.copy2(demo_path, shared_latest)
 
-        # Extend metadata.json with demo_video_url
+        # demo_video_url points to the VERSIONED file so cache-busting is
+        # automatic across runs.
         meta_path = project_dir / "metadata.json"
         meta = _read_metadata(project_dir)
-        meta["demo_video_url"] = f"https://clawdash.trollefsen.com/media/mvps/{slug}/demo.mp4"
+        versioned_url = f"https://clawdash.trollefsen.com/media/mvps/{slug}/{versioned_name}"
+        meta["demo_video_url"] = versioned_url
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-        st.extra["shared_path"] = str(shared_demo)
-        st.extra["demo_video_url"] = meta["demo_video_url"]
+        st.extra["shared_versioned_path"] = str(shared_versioned)
+        st.extra["shared_latest_path"] = str(shared_latest)
+        st.extra["demo_video_url"] = versioned_url
+        st.extra["run_id"] = pipe.run_id
 
     pipe.flush()
     return {
         "project": project_dir.name,
         "demo_path": str(demo_path),
-        "shared_path": str(shared_dir / "demo.mp4"),
+        "shared_path": str(shared_versioned),
         "demo_video_url": meta["demo_video_url"],
         "stages": [s.stage_id for s in pipe.stages],
         "log_path": str(pipe.log_path),

@@ -2,8 +2,8 @@
 
 Inputs: metadata.json (the actual product story), README.md (background),
 optional scene plan (timing context only).
-Output: script.md with optional frontmatter + 50–80 word body
-(~20–32s of voiceover at narrator pace).
+Output: script.md with optional frontmatter + 80–110 word body
+(~32–44s of voiceover at narrator pace).
 
 Design principle: the PRODUCT is the subject. The scene plan is timing
 context, not content — narration must NOT lift demo data ("Alpine Ridge
@@ -44,7 +44,7 @@ You will receive a USER prompt with two clearly-separated blocks:
                     NEVER mention any of it.
 
 Rules:
-- Total length: 50–80 spoken words (~20–32s at narrator pace). Hard cap.
+- Total length: 80–110 spoken words (~32–44s at narrator pace). Hard cap.
 - Subject is the PRODUCT, not the demo data shown on screen.
 - One continuous voiceover. No 3-act structure, no "today we're looking
   at...", no sign-off.
@@ -178,15 +178,41 @@ def _user_prompt(metadata: dict, readme: str, scenes: list[dict] | None = None) 
     if scenes:
         bits.append(_format_scenes(scenes))
     bits.append("")
-    bits.append("=== INSTRUCTION ===")
+    bits.append("=== INSTRUCTION (nightly-MVP demo voiceover) ===")
     bits.append(
-        "Write a 50–80 word voiceover ABOUT THE PRODUCT. The PRODUCT block "
-        "above is the subject. The SCENE PLAN block is visual timing "
-        "context — DO NOT lift content from it, and IGNORE any demo data "
-        "you saw in metadata or README (sample trip names, placeholder "
-        "brand inputs, dummy dates). The viewer can see demo data on "
-        "screen; the voice should explain why someone would use this "
-        "PRODUCT. Output ONLY the script body — no headings, no labels."
+        "Write an 80–110 word voiceover for a nightly-MVP demo reel "
+        "ABOUT THE PRODUCT.\n"
+        "\n"
+        "OPENING (mandatory pattern):\n"
+        "  The first sentence MUST set the scene by naming the *problem* "
+        "the product solves, then introduce the product by name in that "
+        "same sentence or the immediately following sentence. Examples of "
+        "valid openers:\n"
+        "    \"Multi-crew trips used to mean six text threads. Trip Command "
+        "Center pulls them into one canvas...\"\n"
+        "    \"Generating four logo concepts at once usually means four "
+        "tabs. Mark Forge runs all four in parallel from one prompt...\"\n"
+        "  FORBIDDEN OPENERS: anything starting with \"In Trollefsen,...\", "
+        "\"The Tollefsen household...\", \"Today's MVP from...\", or family "
+        "naming. Never make the household the subject. The PRODUCT is the "
+        "subject.\n"
+        "\n"
+        "CLOSING (mandatory): the last sentence must be a one-line "
+        "why-it-matters — what changes for the user — NOT a sign-off and "
+        "NOT a feature recap.\n"
+        "\n"
+        "CONTENT RULES:\n"
+        "- Subject = the PRODUCT block above. Mention only features it "
+        "confirms.\n"
+        "- The SCENE PLAN block is visual timing context only. DO NOT "
+        "lift content from it.\n"
+        "- IGNORE demo data anywhere it appears (sample trip names, "
+        "placeholder brand inputs, dummy dates, fake user names). The "
+        "viewer can see demo data on screen; the voice must explain why "
+        "someone would use this PRODUCT.\n"
+        "- One continuous voiceover, conversational tone, no act labels.\n"
+        "\n"
+        "Output ONLY the script body — no headings, no labels, no markdown."
     )
     return "\n".join(bits)
 
@@ -303,7 +329,7 @@ def draft_script(
             f"script and MUST NOT appear: {', '.join(leaked)}. "
             "Rewrite the voiceover focusing on the PRODUCT (what it does, "
             "why it exists) and reference the demo data NOT AT ALL. "
-            "Same 50–80 word budget."
+            "Same 80–110 word budget."
         )
         body = _call(extra_user_instruction=retry_instruction)
         body = canonicalize_brand_terms(body)
