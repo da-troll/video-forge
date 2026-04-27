@@ -5,7 +5,7 @@ description: Edit any video by conversation. Transcribe, cut, color grade, gener
 
 # Video Use
 
-> **Two modes.** This document covers SKILL mode — interactive editing of footage you point Claude at. For autonomous nightly-MVP demo generation (`python -m video_forge.demo`), see the project README. Module mode runs preflight → plan → script → tts → loudnorm → walkthrough → align → assemble → assertions → output, produces a ~25–35s demo.mp4, and currently targets a 50–80-word script with a tail-gap assertion (≤12s) to catch narration-vs-walkthrough mismatch before publishing.
+> **Two modes.** This document covers SKILL mode — interactive editing of footage you point Claude at. For autonomous nightly-MVP demo generation (`python -m video_forge.demo`), see the project README. Module mode runs preflight → plan → script → tts → loudnorm → walkthrough → align → assemble → assertions → output, targets 130–200-word product-story scripts (~47–73s at 1.10× speed) over 50–75s walkthroughs with a tail-gap ceiling (≤12s) and demo-data anti-leakage retry. Versioned output (`demo-<run_id>.mp4`) for cache-stable URLs.
 
 ## Principle
 

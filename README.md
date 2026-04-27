@@ -4,15 +4,15 @@ Conversation-driven video editor and demo-reel generator for the household.
 
 <video src="https://github.com/da-troll/video-forge/raw/main/assets/mark-forge-demo.mp4" controls width="100%"></video>
 
-> **Demo above:** [Mark Forge](https://github.com/da-troll/logo-generator) — a household logo generator — fully auto-produced by `python -m video_forge.demo` from nothing but the project's `metadata.json` + `README.md`. ~60s end-to-end, no human in the loop.
+> **Demo above:** [Mark Forge](https://github.com/da-troll/logo-generator) — a household logo generator — fully auto-produced by `python -m video_forge.demo` from nothing but the project's `metadata.json` + `README.md`. End-to-end in ~60–90s wall-clock, no human in the loop.
 
-Drop a folder of footage and chat with Claude Code to produce `final.mp4`. Or point the orchestrator at a nightly MVP project directory and get a ~25–35s demo video — voiceover + walkthrough + subtitles — without lifting a finger.
+Drop a folder of footage and chat with Claude Code to produce `final.mp4`. Or point the orchestrator at a nightly MVP project directory and get a 45–75s demo video — voiceover + walkthrough + subtitles — without lifting a finger.
 
 ## Two modes
 
 **Skill mode (interactive)** — drop into a folder of takes, run your agent, say "edit these into a launch video." The agent reads transcripts, proposes a strategy, waits for confirmation, then cuts. Audio-first reasoning, on-demand visual composites — the LLM never watches the video, it *reads* it.
 
-**Module mode (autonomous)** — point at a nightly MVP project directory; the orchestrator runs a scene planner against the live URL, drafts a tight 50–80-word script paced to the planned visual beats, synthesizes the voiceover, records a Playwright walkthrough, transcribes for word-level subtitles, and assembles `demo.mp4`. End-to-end in ~60 seconds wall-clock for a typical static MVP.
+**Module mode (autonomous)** — point at a nightly MVP project directory; the orchestrator runs a scene planner against the live URL, drafts a 130–200-word product-story voiceover (problem-first opener, no demo-data leak), synthesizes at 1.10× speed via OpenAI nova, records a Playwright walkthrough (12–18 scenes, 4s wait floors / 3.5s post-action floors), transcribes for word-level subtitles, and assembles `demo.mp4`. Output is versioned (`demo-<run_id>.mp4`) so the URL is cache-stable across runs. End-to-end in 60–110 seconds wall-clock.
 
 ```bash
 # Skill mode
@@ -45,15 +45,15 @@ PREFLIGHT ──> PLAN ──> SCRIPT ──> TTS ──> LOUDNORM ──> WALKT
 | Stage | What | Notes |
 |---|---|---|
 | preflight | HTTP 200 + Playwright load + identity check on `live_url` | aborts before any LLM/TTS spend if the URL is broken |
-| plan | `scene_planner.plan_scenes` → `scenes.json` | gpt-5.4 + DOM probe + 1280×720 screenshot, strict-mode JSON |
-| script | scene-aware draft via gpt-5.4 | strict 50–80-word budget tied to typical walkthrough length |
-| tts | multi-provider with fallback chain | nova default; OpenAI gpt-4o-mini-tts |
+| plan | `scene_planner.plan_scenes` → `scenes.json` | gpt-5.4 + DOM probe + 1280×720 screenshot, strict-mode JSON; pacing floors enforced post-LLM (wait ≥4s, action_after ≥3.5s); `estimated_duration_s` is recomputed from scene-sums (LLM self-report ignored). 12–18 scenes, 50–75s walkthrough target. |
+| script | product-story draft via gpt-5.4 | 130–200-word budget; problem-first opener pattern (hard-banned: "In Trollefsen…", "The Tollefsen household…", any family naming as subject); closing why-it-matters one-liner; demo-data anti-leakage retry (rejects screen-reader regressions where >35% of script tokens overlap with scene names/values, retries once with explicit forbidden-token list) |
+| tts | OpenAI gpt-4o-mini-tts at 1.10× speed | nova default; speed configurable via `default_speed` in household.json |
 | loudnorm | two-pass loudnorm to −14 LUFS / −1 dBTP | runs before align so Whisper sees normalized audio |
-| walkthrough | Playwright records `walkthrough.mp4` | press_sequentially for visible typing in form fills |
-| align | Whisper-1 word timestamps + Needleman-Wunsch script substitution | speech-onset anchored, falls back to uniform on API failure |
-| assemble | filter-graph mux: walkthrough + voiceover + burned-in SRT | hold-tail strategy fills audio-vs-video gaps; subtitles applied last |
+| walkthrough | Playwright records `walkthrough.mp4` | press_sequentially typing for visible form fills; raw .webm preserved in `edit/_raw_debug/` for truncation diagnosis; multi-webm concatenation if Playwright splits the recording on hard navigation |
+| align | Whisper-1 word timestamps + Needleman-Wunsch script substitution | speech-onset anchored, falls back to uniform on API failure. (`gpt-4o-transcribe` is faster but rejects `verbose_json`, so word timestamps unavailable — keep whisper-1 until ElevenLabs Scribe is wired into align.py.) |
+| assemble | filter-graph mux: walkthrough + voiceover + burned-in SRT | hold-tail strategy fills audio-vs-video gaps; subtitles applied last; phrase-length cues (~5 words/cue), FontSize 14, Outline 1.2 |
 | assertions | quality gate: file size, duration, SRT integrity, lead silence, tail drift, **tail-gap (≤12s)**, integrated LUFS | failure aborts before publishing |
-| output | copy to `/home/eve/workspaces/shared/images/mvps/<slug>/demo.mp4` and update `metadata.json` | served at `https://clawdash.trollefsen.com/media/mvps/<slug>/demo.mp4` |
+| output | versioned `demo-<run_id>.mp4` + `demo.mp4` "latest" copy in shared dir; `metadata.json.demo_video_url` points to versioned file for cache-busting | served at `https://clawdash.trollefsen.com/media/mvps/<slug>/demo-<run_id>.mp4` |
 
 Each stage logs to `<project>/edit/pipeline.log.json` with timings, cache hits, retry count, fallback chain walked. Run with `--gantt` to render a Mermaid Gantt of the run.
 
@@ -76,7 +76,8 @@ The skill enforces 12 production-correctness rules (subtitles last in the filter
 ```json
 "video_forge": {
   "default_provider": "openai",
-  "default_voice": "alloy",
+  "default_voice": "nova",
+  "default_speed": 1.10,
   "default_instructions": null,
   "fallback_chain": ["openai", "gemini", "elevenlabs"],
   "transcription_provider": "elevenlabs",
@@ -84,6 +85,8 @@ The skill enforces 12 production-correctness rules (subtitles last in the filter
   "tail_strategy": "hold"
 }
 ```
+
+`default_speed` is the TTS playback rate (only honored by OpenAI's adapter; gemini/elevenlabs ignore). 1.10 is the empirical sweet spot — 1.15 sounded mildly rushed in QA; 1.0 felt sluggish against typical walkthrough pacing.
 
 Voice can be a raw `voice_id` or a saved `profile_id`. Resolved per call.
 
@@ -105,6 +108,10 @@ Override at runtime with `--tail-strategy {hold,loop,trim_voice}`.
 Edit `brand-lexicon.yaml` to add new products, agents, or pronunciations.
 
 **Scene planner.** Module mode uses `video_forge/demo/scene_planner.py` to produce an MVP-aware walkthrough plan. The planner does a 5s headless DOM probe + screenshot, sends the result to `gpt-5.4` with a strict JSON schema, and writes `<project>/edit/scenes.json`. The plan is reused on subsequent runs (hand-edit between runs to refine), or use `--regen-scenes` to force a fresh plan. Pass `--scene-plan <path>` to bypass the planner with a hand-authored file. If the planner fails or `gpt-5.4` is unavailable, the recorder falls back to a generic CTA-hunting plan.
+
+**MVP visibility for recording.** `mvp.trollefsen.com` projects sit behind a basic-auth gate by default. The video-forge Playwright session does not authenticate. Workaround: flip `metadata.json.visibility` to `"public"`, run `bash /home/eve/workspaces/shared/scripts/nightly-builder/mvp-finalize.sh`, run the orchestrator, flip back to `"private"`, finalize again. There is no `--auth` flag yet; this is the next obvious wiring task when integrating with the nightly cron.
+
+**System fonts.** Headless Chromium ships without emoji glyphs on Linux. Install `fonts-noto-color-emoji` system-wide (`sudo apt install fonts-noto-color-emoji && sudo fc-cache -fv`) so MVPs with emoji UI (cover pickers, status badges) render correctly in the recording.
 
 ## Install
 
