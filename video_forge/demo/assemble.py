@@ -25,8 +25,8 @@ from ..references import canonicalize_brand_terms
 PUNCT_BREAK = set(".,!?;:")
 SUB_STYLE = (
     "FontName=Helvetica,FontSize=18,PrimaryColour=&H00FFFFFF,"
-    "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,"
-    "Bold=1,Alignment=2,MarginV=24"
+    "OutlineColour=&H00000000,BorderStyle=1,Outline=1.2,Shadow=0,"
+    "Bold=1,Alignment=2,MarginV=24,WrapStyle=2"
 )
 
 
@@ -64,6 +64,45 @@ def _chunk_words(words: list[dict]) -> list[list[dict]]:
 # sooner). The underlying word-level timings stay honest; only the visible
 # cue is stretched.
 SRT_MIN_CUE_S = 0.20
+
+
+# Minimum gap (seconds) between consecutive SRT cues. libass treats
+# overlapping cues by stacking them — if cue N's end-time spills past
+# cue N+1's start, the renderer puts cue N+1 ABOVE the bottom row to
+# keep both visible. That's the "row 1 vs row 2" symptom Daniel saw on
+# 0:26-0:27 and 0:29-0:31 of the H1+H2 demo.
+SRT_INTER_CUE_GAP_S = 0.010
+
+
+def _clip_overlaps(cues: list[tuple[float, float, str]]) -> tuple[list[tuple[float, float, str]], int]:
+    """Ensure cue N+1.start > cue N.end + SRT_INTER_CUE_GAP_S.
+
+    Whisper-1 occasionally returns word timestamps where word_n.end is
+    later than word_{n+1}.start (or even identical to it), and the cue
+    chunker propagates these overlaps when it takes word[0].start /
+    word[-1].end as cue boundaries. This pass walks the cue list and
+    pulls each cue's end back so it leaves at least a 10ms gap before
+    the next cue starts. The cue's start is never touched, only the
+    end is shortened — caller's min-duration enforcement runs AFTER
+    this so any cue clipped below the readable floor is then either
+    stretched (if room) or merged with its neighbor.
+
+    Returns (clipped_cues, clip_count) where clip_count is the number
+    of cues whose end was actually moved.
+    """
+    if not cues:
+        return cues, 0
+    out = list(cues)
+    clipped = 0
+    for i in range(len(out) - 1):
+        s, e, t = out[i]
+        next_s = out[i + 1][0]
+        if e > next_s - SRT_INTER_CUE_GAP_S:
+            new_e = max(s + 0.05, next_s - SRT_INTER_CUE_GAP_S)
+            if abs(new_e - e) > 0.001:
+                out[i] = (s, new_e, t)
+                clipped += 1
+    return out, clipped
 
 
 def _enforce_cue_min_duration(cues: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
@@ -175,8 +214,11 @@ def build_master_srt(transcript_path: Path, srt_path: Path) -> dict:
         text = " ".join((w.get("text") or "").strip() for w in chunk).upper()
         raw_cues.append((start, end, text))
 
-    cues = _enforce_cue_min_duration(raw_cues)
-    stretches = sum(1 for r, c in zip(raw_cues, cues) if c[1] != r[1])
+    # 1) Clip overlapping cues (libass would stack them on row 1 otherwise).
+    clipped_cues, overlap_clips = _clip_overlaps(raw_cues)
+    # 2) Stretch / merge cues below readable floor.
+    cues = _enforce_cue_min_duration(clipped_cues)
+    stretches = sum(1 for r, c in zip(clipped_cues, cues) if c[1] != r[1] or c[2] != r[2])
 
     lines: list[str] = []
     for i, (s, e, t) in enumerate(cues, 1):
@@ -188,6 +230,7 @@ def build_master_srt(transcript_path: Path, srt_path: Path) -> dict:
     return {
         "cue_count": len(cues),
         "canonicalizations_applied": canon_applied,
+        "overlap_clips_applied": overlap_clips,
         "min_duration_stretches": stretches,
     }
 

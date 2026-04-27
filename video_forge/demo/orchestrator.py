@@ -202,8 +202,12 @@ def run(project_dir: Path, options: dict[str, Any] | None = None) -> dict:
     with pipe.stage("assemble") as st:
         srt_path = edit_dir / "demo.srt"
         srt_meta = build_master_srt(transcript_path, srt_path)
-        st.extra["srt_cues"] = srt_meta["cue_count"]
-        st.extra["srt_canonicalizations"] = srt_meta["canonicalizations_applied"]
+        # Spread all srt_meta fields so any new keys (overlap_clips_applied,
+        # min_duration_stretches, etc.) land in pipeline.log.json automatically.
+        st.extra["srt_cues"] = srt_meta.get("cue_count")
+        st.extra["srt_canonicalizations"] = srt_meta.get("canonicalizations_applied", 0)
+        st.extra["srt_overlap_clips"] = srt_meta.get("overlap_clips_applied", 0)
+        st.extra["srt_min_duration_stretches"] = srt_meta.get("min_duration_stretches", 0)
 
         demo_path = edit_dir / "demo.mp4"
         chosen_strategy = options.get("tail_strategy") or cfg_tail_strategy()
