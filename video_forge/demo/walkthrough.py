@@ -265,29 +265,72 @@ def record(
         context.close()
         browser.close()
 
-    # Find the produced video file (Playwright names it deterministically — first webm in raw_dir).
+    # Find produced video file(s). Playwright writes one .webm per page
+    # session. A hard navigation (window.location change) finalizes the
+    # current .webm and opens a new one. We collect ALL of them so a
+    # truncation-on-navigation symptom is recoverable downstream.
     raw_videos = sorted(raw_dir.glob("*.webm"))
     if not raw_videos:
         raise RuntimeError("playwright produced no video")
-    raw_video = raw_videos[0]
+
+    # ── DIAGNOSTIC: preserve raw .webm files in edit/_raw_debug/ ─────────
+    # Helps diagnose recording-truncation issues (Trip Command Center
+    # 2026-04-27): is it a multi-file split, a Playwright cap, or an
+    # ffmpeg re-encode bug? Probe each raw file's duration and log
+    # alongside the produced mp4's duration.
+    debug_dir = edit_dir / "_raw_debug"
+    debug_dir.mkdir(exist_ok=True)
+    raw_durations: list[dict] = []
+    for i, rv in enumerate(raw_videos, 1):
+        kept = debug_dir / f"raw_{i:02d}_{rv.name}"
+        shutil.copy2(rv, kept)
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(rv)],
+                capture_output=True, text=True, check=True,
+            )
+            raw_durations.append({"file": kept.name, "duration_s": float((r.stdout or "0").strip() or "0")})
+        except Exception as e:
+            raw_durations.append({"file": kept.name, "error": str(e)})
+    log.info("playwright raw webm files: %s", raw_durations)
 
     out_mp4 = edit_dir / "walkthrough.mp4"
-    # Re-encode with H.264 + AAC silence track so render.py / ffmpeg downstream
-    # don't have to deal with VP8/VP9 + missing audio. -shortest caps the silent
-    # track so audio doesn't extend past the video.
-    subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-i", str(raw_video),
-            "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-shortest",
-            str(out_mp4),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    # If only one raw file, encode it directly. If multiple (page navigation
+    # split the recording), concat all of them via ffmpeg concat-demuxer
+    # then encode — preserves the full session instead of dropping later
+    # pages.
+    if len(raw_videos) == 1:
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(raw_videos[0]),
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest",
+                str(out_mp4),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        log.warning("playwright produced %d webm files — concatenating", len(raw_videos))
+        list_path = raw_dir / "_concat_list.txt"
+        list_path.write_text("\n".join(f"file '{rv.resolve()}'" for rv in raw_videos) + "\n")
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0", "-i", str(list_path),
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest",
+                str(out_mp4),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     # Probe duration so the orchestrator can pad/trim audio to fit.
     probe = subprocess.run(
@@ -298,8 +341,15 @@ def record(
         text=True,
     )
     duration_s = float(probe.stdout.strip() or "0")
+    log.info("walkthrough.mp4 duration=%.2fs (raw total=%.2fs)",
+             duration_s, sum(d.get("duration_s", 0.0) for d in raw_durations))
 
-    # Clean up raw webm to save space.
+    # Persist diagnostic info alongside the debug files.
+    (debug_dir / "raw_durations.json").write_text(
+        json.dumps({"raw_files": raw_durations, "encoded_mp4_s": duration_s}, indent=2)
+    )
+
+    # Clean up raw webm work dir; the kept copies in _raw_debug/ remain.
     shutil.rmtree(raw_dir, ignore_errors=True)
 
     scene_meta = {
