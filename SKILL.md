@@ -5,6 +5,8 @@ description: Edit any video by conversation. Transcribe, cut, color grade, gener
 
 # Video Use
 
+> **Two modes.** This document covers SKILL mode — interactive editing of footage you point Claude at. For autonomous nightly-MVP demo generation (`python -m video_forge.demo`), see the project README. Module mode runs preflight → plan → script → tts → loudnorm → walkthrough → align → assemble → assertions → output, produces a ~25–35s demo.mp4, and currently targets a 50–80-word script with a tail-gap assertion (≤12s) to catch narration-vs-walkthrough mismatch before publishing.
+
 ## Principle
 
 1. **LLM reasons from raw transcript + on-demand visuals.** The only derived artifact that earns its keep is a packed phrase-level transcript (`takes_packed.md`). Everything else — filler tagging, retake detection, shot classification, emphasis scoring — you derive at decision time.

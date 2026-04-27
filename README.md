@@ -6,13 +6,13 @@ Conversation-driven video editor and demo-reel generator for the household.
 
 > **Demo above:** [Mark Forge](https://github.com/da-troll/logo-generator) — a household logo generator — fully auto-produced by `python -m video_forge.demo` from nothing but the project's `metadata.json` + `README.md`. ~60s end-to-end, no human in the loop.
 
-Drop a folder of footage and chat with Claude Code to produce `final.mp4`. Or point the orchestrator at a nightly MVP project directory and get a 60–90s demo video — voiceover + walkthrough + subtitles — without lifting a finger.
+Drop a folder of footage and chat with Claude Code to produce `final.mp4`. Or point the orchestrator at a nightly MVP project directory and get a ~25–35s demo video — voiceover + walkthrough + subtitles — without lifting a finger.
 
 ## Two modes
 
 **Skill mode (interactive)** — drop into a folder of takes, run your agent, say "edit these into a launch video." The agent reads transcripts, proposes a strategy, waits for confirmation, then cuts. Audio-first reasoning, on-demand visual composites — the LLM never watches the video, it *reads* it.
 
-**Module mode (autonomous)** — point at a nightly MVP project directory; an orchestrator drafts a script from `metadata.json` + `README.md`, synthesizes a voiceover with one of three TTS providers, records a Playwright walkthrough of the live URL, transcribes the voiceover for word-level subtitles, and assembles `demo.mp4`. End-to-end in ~60 seconds wall-clock.
+**Module mode (autonomous)** — point at a nightly MVP project directory; the orchestrator runs a scene planner against the live URL, drafts a tight 50–80-word script paced to the planned visual beats, synthesizes the voiceover, records a Playwright walkthrough, transcribes for word-level subtitles, and assembles `demo.mp4`. End-to-end in ~60 seconds wall-clock for a typical static MVP.
 
 ```bash
 # Skill mode
@@ -38,8 +38,22 @@ Provider order, default voice, and instructions string are runtime-editable. Sav
 ## Pipeline (module mode)
 
 ```
-SCRIPT ──> TTS ──> WALKTHROUGH ──> TRANSCRIBE ──> ASSEMBLE ──> OUTPUT
+PREFLIGHT ──> PLAN ──> SCRIPT ──> TTS ──> LOUDNORM ──> WALKTHROUGH
+   ──> ALIGN ──> ASSEMBLE ──> ASSERTIONS ──> OUTPUT
 ```
+
+| Stage | What | Notes |
+|---|---|---|
+| preflight | HTTP 200 + Playwright load + identity check on `live_url` | aborts before any LLM/TTS spend if the URL is broken |
+| plan | `scene_planner.plan_scenes` → `scenes.json` | gpt-5.4 + DOM probe + 1280×720 screenshot, strict-mode JSON |
+| script | scene-aware draft via gpt-5.4 | strict 50–80-word budget tied to typical walkthrough length |
+| tts | multi-provider with fallback chain | nova default; OpenAI gpt-4o-mini-tts |
+| loudnorm | two-pass loudnorm to −14 LUFS / −1 dBTP | runs before align so Whisper sees normalized audio |
+| walkthrough | Playwright records `walkthrough.mp4` | press_sequentially for visible typing in form fills |
+| align | Whisper-1 word timestamps + Needleman-Wunsch script substitution | speech-onset anchored, falls back to uniform on API failure |
+| assemble | filter-graph mux: walkthrough + voiceover + burned-in SRT | hold-tail strategy fills audio-vs-video gaps; subtitles applied last |
+| assertions | quality gate: file size, duration, SRT integrity, lead silence, tail drift, **tail-gap (≤12s)**, integrated LUFS | failure aborts before publishing |
+| output | copy to `/home/eve/workspaces/shared/images/mvps/<slug>/demo.mp4` and update `metadata.json` | served at `https://clawdash.trollefsen.com/media/mvps/<slug>/demo.mp4` |
 
 Each stage logs to `<project>/edit/pipeline.log.json` with timings, cache hits, retry count, fallback chain walked. Run with `--gantt` to render a Mermaid Gantt of the run.
 
