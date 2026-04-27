@@ -2,8 +2,8 @@
 
 Inputs: metadata.json (the actual product story), README.md (background),
 optional scene plan (timing context only).
-Output: script.md with optional frontmatter + 80–110 word body
-(~32–44s of voiceover at narrator pace).
+Output: script.md with optional frontmatter + 130–200 word body
+(~47–73s of voiceover at narrator pace).
 
 Design principle: the PRODUCT is the subject. The scene plan is timing
 context, not content — narration must NOT lift demo data ("Alpine Ridge
@@ -44,7 +44,7 @@ You will receive a USER prompt with two clearly-separated blocks:
                     NEVER mention any of it.
 
 Rules:
-- Total length: 80–110 spoken words (~32–44s at narrator pace). Hard cap.
+- Total length: 130–200 spoken words (~47–73s at narrator pace). Hard cap.
 - Subject is the PRODUCT, not the demo data shown on screen.
 - One continuous voiceover. No 3-act structure, no "today we're looking
   at...", no sign-off.
@@ -180,7 +180,7 @@ def _user_prompt(metadata: dict, readme: str, scenes: list[dict] | None = None) 
     bits.append("")
     bits.append("=== INSTRUCTION (nightly-MVP demo voiceover) ===")
     bits.append(
-        "Write an 80–110 word voiceover for a nightly-MVP demo reel "
+        "Write an 130–200 word voiceover for a nightly-MVP demo reel "
         "ABOUT THE PRODUCT.\n"
         "\n"
         "OPENING (mandatory pattern):\n"
@@ -329,7 +329,7 @@ def draft_script(
             f"script and MUST NOT appear: {', '.join(leaked)}. "
             "Rewrite the voiceover focusing on the PRODUCT (what it does, "
             "why it exists) and reference the demo data NOT AT ALL. "
-            "Same 80–110 word budget."
+            "Same 130–200 word budget."
         )
         body = _call(extra_user_instruction=retry_instruction)
         body = canonicalize_brand_terms(body)
