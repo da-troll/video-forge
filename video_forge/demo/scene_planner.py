@@ -58,16 +58,14 @@ SYSTEM_PROMPT = (
     "generation).\n"
     "5. Open with a 2-3s 'land' wait scene. Close with a 'scroll' or "
     "'hover' on a key result, not abruptly mid-action.\n"
-    "6. PACING — minimum dwell times (the demo must NOT feel rushed; "
-    "narration must have time to describe each beat):\n"
-    "   - Every 'wait' scene: ms ≥ 4000.\n"
+    "6. PACING — minimum dwell times (the demo must NOT feel rushed):\n"
+    "   - Every 'wait' scene: ms ≥ 2500.\n"
     "   - Every action scene (click/hover/fill/scroll/screenshot): "
-    "ms_after ≥ 3000.\n"
-    "   - Total walkthrough should land at 30-45s, not 15-25s.\n"
+    "ms_after ≥ 1500.\n"
+    "   - Total walkthrough should land at 25-35s.\n"
     "7. OBSERVATION BEATS — after EVERY action scene (click/fill/hover), "
     "insert a brief 'wait' scene with ms=2500 and a note describing what "
-    "the viewer should NOTICE about the result. This gives the eye time "
-    "to register what changed before moving on. Skip only if the next "
+    "the viewer should NOTICE about the result. Skip only if the next "
     "action is on the same target element."
 )
 
@@ -184,8 +182,8 @@ def _atomic_write(path: Path, content: str) -> None:
 # SYSTEM_PROMPT rule 6 for the full rationale: short dwells produce
 # walkthroughs that race ahead of the narration. Belt + suspenders with
 # the prompt instruction.
-MIN_WAIT_MS = 4000
-MIN_MS_AFTER_FOR_ACTIONS = 3000
+MIN_WAIT_MS = 2500
+MIN_MS_AFTER_FOR_ACTIONS = 1500
 
 
 def _enforce_pacing_floors(scene: dict) -> dict:
