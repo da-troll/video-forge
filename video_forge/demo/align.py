@@ -45,10 +45,13 @@ from ..tts import get_openai_key
 
 log = logging.getLogger(__name__)
 
-# gpt-4o-transcribe is the same OpenAI Audio API surface as whisper-1 but
-# significantly faster (3-5x real-time vs whisper-1's ~1x observed in prod).
-# Same word_timestamps response shape, same key.
-WHISPER_MODEL = "gpt-4o-transcribe"
+# NOTE: keep whisper-1. gpt-4o-transcribe is faster but does NOT support
+# response_format=verbose_json, which is required for word-level
+# timestamp_granularities. Without word timestamps the alignment falls
+# back to uniform distribution and subtitles desync. To gain speed without
+# losing word timing, wire ElevenLabs Scribe (already in
+# transcription_fallback_chain) — separate work item.
+WHISPER_MODEL = "whisper-1"
 
 # Tokenize the script into "word" units that pair 1:1 with what Whisper emits.
 # Strategy: split on whitespace and treat each whitespace-separated chunk as a
